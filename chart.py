@@ -6,7 +6,7 @@ import plotly.graph_objects as go
 from divergence import find_regular_divergences
 from pivots import find_pivots, find_rsi_pivots
 from signal_quality import calculate_quality_score
-from time_utils import format_polish_time, to_polish_datetime
+from time_utils import format_polish_time
 
 
 BG_COLOR = "#111315"
@@ -105,7 +105,7 @@ class SmartTradeChart:
             template="plotly_dark",
             margin=dict(l=0, r=0, t=0, b=0),
             showlegend=False,
-            hovermode="x unified",
+            hovermode=False,
             xaxis_rangeslider_visible=False,
             paper_bgcolor=BG_COLOR,
             plot_bgcolor=BG_COLOR,
@@ -130,15 +130,7 @@ class SmartTradeChart:
                 low=self.candles["low"],
                 close=self.candles["close"],
                 name="Price",
-                customdata=self.candles[["time", "volume"]],
-                hovertemplate=(
-                    "Czas PL: %{customdata[0]|%H:%M %d.%m.%Y}<br>"
-                    "Open: %{open}<br>"
-                    "High: %{high}<br>"
-                    "Low: %{low}<br>"
-                    "Close: %{close}<br>"
-                    "Volume: %{customdata[1]}<extra></extra>"
-                ),
+                hoverinfo="skip",
                 showlegend=False
             )
         )
@@ -242,6 +234,7 @@ class SmartTradeChart:
                 mode="lines+text",
                 line=dict(color=color, width=2),
                 text=["", label, ""],
+                textfont=dict(color=TEXT_COLOR),
                 textposition="middle center",
                 name=f"{name} Price"
             )
@@ -258,6 +251,7 @@ class SmartTradeChart:
                 mode="lines+text",
                 line=dict(color=color, width=2),
                 text=["", label, ""],
+                textfont=dict(color=TEXT_COLOR),
                 textposition="middle center",
                 name=f"{name} RSI",
                 yaxis="y2"
@@ -438,14 +432,15 @@ class SmartTradeChart:
             rsi_top,
             rsi_bottom
         )
-        self._draw_crosshair(width, price_top, rsi_bottom, padding)
-        self._draw_hover_tooltip(
-            visible_candles,
-            step,
-            padding,
+        self._draw_crosshair(
             width,
             price_top,
-            rsi_bottom
+            rsi_bottom,
+            padding,
+            high,
+            low,
+            price_top,
+            candle_area_height
         )
 
     def _draw_empty_state(self):
@@ -691,7 +686,7 @@ class SmartTradeChart:
             (price_start_x + price_end_x) / 2,
             ((price_start_y + price_end_y) / 2) - 14,
             text=label,
-            fill=color,
+            fill=TEXT_COLOR,
             font=("Arial", 9, "bold")
         )
 
@@ -707,7 +702,7 @@ class SmartTradeChart:
             (rsi_start_x + rsi_end_x) / 2,
             ((rsi_start_y + rsi_end_y) / 2) - 14,
             text=label,
-            fill=color,
+            fill=TEXT_COLOR,
             font=("Arial", 9, "bold")
         )
 
@@ -724,7 +719,17 @@ class SmartTradeChart:
 
         return padding + (visible_index * step) + (step / 2)
 
-    def _draw_crosshair(self, width, top, bottom, padding):
+    def _draw_crosshair(
+        self,
+        width,
+        top,
+        bottom,
+        padding,
+        high,
+        low,
+        price_top,
+        price_height
+    ):
 
         if self.crosshair_x is None or self.crosshair_y is None:
             return
@@ -751,61 +756,59 @@ class SmartTradeChart:
             fill="#666666",
             dash=(4, 4)
         )
+        self._draw_cursor_price_label(
+            width,
+            padding,
+            high,
+            low,
+            price_top,
+            price_height
+        )
 
-    def _draw_hover_tooltip(self, visible_candles, step, padding, width, top, bottom):
+    def _draw_cursor_price_label(self, width, padding, high, low, top, chart_height):
 
-        if self.crosshair_x is None or self.crosshair_y is None:
+        if self.crosshair_y is None:
             return
 
-        if not padding <= self.crosshair_x <= width - padding:
+        if chart_height <= 0:
             return
 
-        if not top <= self.crosshair_y <= bottom:
+        if not top <= self.crosshair_y <= top + chart_height:
             return
 
-        candle_index = int((self.crosshair_x - padding) / step)
+        price = high - ((self.crosshair_y - top) / chart_height) * (high - low)
+        self._draw_price_axis_label(
+            width,
+            padding,
+            self.crosshair_y,
+            price,
+            BG_COLOR,
+            TEXT_COLOR
+        )
 
-        if not 0 <= candle_index < len(visible_candles):
-            return
+    def _draw_price_axis_label(self, width, padding, y, price, fill, text_fill):
 
-        candle = visible_candles.iloc[candle_index]
-        candle_time = to_polish_datetime(candle["time"]).strftime("%H:%M %d.%m.%Y")
-        lines = [
-            f"Czas PL: {candle_time}",
-            f"Open: {candle['open']:.4f}",
-            f"High: {candle['high']:.4f}",
-            f"Low: {candle['low']:.4f}",
-            f"Close: {candle['close']:.4f}",
-            f"Volume: {candle['volume']:.2f}"
-        ]
-
-        tooltip_text = "\n".join(lines)
-        tooltip_width = 190
-        tooltip_height = 112
-        x = self.crosshair_x + 14
-        y = self.crosshair_y + 14
-
-        if x + tooltip_width > width - 6:
-            x = self.crosshair_x - tooltip_width - 14
-
-        if y + tooltip_height > bottom - 6:
-            y = self.crosshair_y - tooltip_height - 14
+        label_width = 72
+        label_height = 20
+        x1 = width - 2
+        x0 = x1 - label_width
+        y0 = y - (label_height / 2)
+        y1 = y + (label_height / 2)
 
         self.canvas.create_rectangle(
-            x,
-            y,
-            x + tooltip_width,
-            y + tooltip_height,
-            fill=PANEL_COLOR,
+            x0,
+            y0,
+            x1,
+            y1,
+            fill=fill,
             outline=BORDER_COLOR
         )
         self.canvas.create_text(
-            x + 10,
-            y + 10,
-            text=tooltip_text,
-            fill=TEXT_COLOR,
-            anchor="nw",
-            font=("Arial", 9)
+            (x0 + x1) / 2,
+            y,
+            text=f"{price:.4f}",
+            fill=text_fill,
+            font=("Arial", 9, "bold")
         )
 
     def _price_to_y(self, price, high, low, padding, chart_height):

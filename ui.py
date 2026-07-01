@@ -62,9 +62,7 @@ class SmartTradeUI:
         self.buttons = []
         self.timeframe_buttons = {}
         self.scan_mode_buttons = {}
-        self.best_divergence_label = None
         self.top_time_label = None
-        self.bottom_time_label = None
         self.top_timeframe_label = None
         self.last_scan_label = None
         self.next_scan_label = None
@@ -131,18 +129,6 @@ class SmartTradeUI:
         price = round(df["close"].iloc[-1], 2)
 
         self.chart.set_candles(df)
-        self.update_best_divergence_panel(
-            self.select_freshest_best_signal(
-                self.chart.regular_divergences,
-                len(self.chart.candles),
-                visible_only=True
-            ),
-            len(self.chart.candles)
-        )
-
-        self.center_label.configure(
-            text=f"{self.selected_symbol}\n\nCena: {price}\n\nRSI: {rsi}"
-        )
 
     def refresh_one_coin(self):
 
@@ -1021,44 +1007,13 @@ class SmartTradeUI:
         )
         top_bar.pack(fill="x", padx=10, pady=(0, 10))
 
-        ctk.CTkLabel(
-            top_bar,
-            text="SmartTrade",
-            font=("Arial", 20, "bold"),
-            text_color=TEXT_COLOR
-        ).pack(side="left", padx=14)
-
         self.top_time_label = ctk.CTkLabel(
             top_bar,
             text="Czas PL: --:--:--",
             font=("Arial", 13, "bold"),
             text_color=MUTED_TEXT_COLOR
         )
-        self.top_time_label.pack(side="left", padx=18)
-
-        self.last_scan_label = ctk.CTkLabel(
-            top_bar,
-            text="Ostatni skan: --:--:--",
-            font=("Arial", 13, "bold"),
-            text_color=MUTED_TEXT_COLOR
-        )
-        self.last_scan_label.pack(side="left", padx=14)
-
-        self.next_scan_label = ctk.CTkLabel(
-            top_bar,
-            text=f"Następny skan za: {self.next_scan_seconds} s",
-            font=("Arial", 13, "bold"),
-            text_color=MUTED_TEXT_COLOR
-        )
-        self.next_scan_label.pack(side="left", padx=14)
-
-        self.scan_progress_label = ctk.CTkLabel(
-            top_bar,
-            text="Skan: 0/0",
-            font=("Arial", 13, "bold"),
-            text_color=MUTED_TEXT_COLOR
-        )
-        self.scan_progress_label.pack(side="left", padx=14)
+        self.top_time_label.pack(side="left", padx=14)
 
         self.top_timeframe_label = ctk.CTkLabel(
             top_bar,
@@ -1067,83 +1022,6 @@ class SmartTradeUI:
             text_color=BLUE
         )
         self.top_timeframe_label.pack(side="right", padx=14)
-
-    def build_bottom_panel(self):
-
-        self.status_bar.grid_columnconfigure(0, weight=1)
-        self.status_bar.grid_columnconfigure(1, weight=1)
-        self.status_bar.grid_columnconfigure(2, weight=2)
-
-        time_section = self.create_bottom_section(self.status_bar, "Czas PL", 0)
-        self.bottom_time_label = ctk.CTkLabel(
-            time_section,
-            text="--:--:--",
-            font=("Arial", 16, "bold"),
-            text_color=TEXT_COLOR
-        )
-        self.bottom_time_label.pack(anchor="w")
-
-        legend_section = self.create_bottom_section(self.status_bar, "Legenda statusów", 1)
-        ctk.CTkLabel(
-            legend_section,
-            text="ACTIVE   AGING   EXPIRED",
-            font=("Arial", 12, "bold"),
-            text_color=TEXT_COLOR
-        ).pack(anchor="w")
-        ctk.CTkLabel(
-            legend_section,
-            text="zielony   żółty   szary",
-            font=("Arial", 11),
-            text_color=MUTED_TEXT_COLOR
-        ).pack(anchor="w")
-
-        best_section = self.create_bottom_section(self.status_bar, "Najlepsza dywergencja", 2)
-        self.best_divergence_label = ctk.CTkLabel(
-            best_section,
-            text="—",
-            font=("Arial", 12, "bold"),
-            text_color=MUTED_TEXT_COLOR,
-            anchor="w",
-            justify="left"
-        )
-        self.best_divergence_label.pack(fill="x")
-
-    def create_bottom_section(self, parent, title, column):
-
-        section = ctk.CTkFrame(
-            parent,
-            fg_color=PANEL_COLOR,
-            corner_radius=8
-        )
-        section.grid(row=0, column=column, sticky="nsew", padx=10, pady=8)
-
-        ctk.CTkLabel(
-            section,
-            text=title,
-            font=("Arial", 11, "bold"),
-            text_color=MUTED_TEXT_COLOR
-        ).pack(anchor="w")
-
-        return section
-
-    def update_best_divergence_panel(self, divergence, candle_count):
-
-        if self.best_divergence_label is None:
-            return
-
-        if divergence is None:
-            self.best_divergence_label.configure(text="—", text_color=MUTED_TEXT_COLOR)
-            return
-
-        setup_text, setup_color = self.signal_setup_text(divergence)
-        signal_time = self.signal_time_text(divergence)
-        age_text = self.signal_age_text(divergence, candle_count)
-        status, _status_color = self.signal_status(divergence, candle_count)
-
-        self.best_divergence_label.configure(
-            text=f"{status}  {setup_text}  {signal_time}  {age_text}",
-            text_color=setup_color
-        )
 
     def interval_label(self, interval):
 
@@ -1225,29 +1103,7 @@ class SmartTradeUI:
         self.chart = SmartTradeChart(self.center)
         self.chart.pack(fill="both", expand=True, padx=10, pady=(0, 10))
 
-        self.status_bar = ctk.CTkFrame(
-            self.center,
-            height=70,
-            fg_color=PANEL_COLOR,
-            border_color=BORDER_COLOR,
-            border_width=1,
-            corner_radius=10
-        )
-        self.status_bar.pack(fill="x", padx=10, pady=(0, 10))
-
-        self.build_bottom_panel()
-
-        self.center_label = ctk.CTkLabel(
-            self.center,
-            text="Kliknij coina",
-            font=("Arial",24,"bold"),
-            text_color=TEXT_COLOR
-        )
-
-        self.center_label.pack(fill="x", padx=10, pady=(0, 10))
-
         self.update_polish_time()
-        self.update_scan_countdown()
         self.scan_one_coin()
 
     def update_polish_time(self):
@@ -1259,9 +1115,6 @@ class SmartTradeUI:
                 self.top_time_label,
                 text=f"Czas PL: {current_time}"
             )
-
-        if self.bottom_time_label is not None:
-            self.configure_label_if_changed(self.bottom_time_label, text=current_time)
 
         self.app.after(1000, self.update_polish_time)
 
