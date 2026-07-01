@@ -157,6 +157,8 @@ def _build_divergence(kind, price_start, price_end, rsi_start, rsi_end):
         "price_end": price_end,
         "rsi_start": rsi_start,
         "rsi_end": rsi_end,
+        "quality": None,
+        # Deprecated: kept temporarily for compatibility with earlier code.
         "strength": 0
     }
 

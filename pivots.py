@@ -38,3 +38,44 @@ def find_pivots(df, left=3, right=3):
             })
 
     return pivot_highs, pivot_lows
+
+
+def find_rsi_pivots(rsi, times, left=3, right=3):
+
+    rsi_df = _build_rsi_pivot_frame(rsi, times)
+
+    if rsi_df.empty:
+        return [], []
+
+    pivot_highs, pivot_lows = find_pivots(rsi_df, left=left, right=right)
+
+    return (
+        _restore_original_pivot_indexes(pivot_highs, rsi_df),
+        _restore_original_pivot_indexes(pivot_lows, rsi_df)
+    )
+
+
+def _build_rsi_pivot_frame(rsi, times):
+
+    rsi_df = rsi.to_frame(name="rsi")
+    rsi_df["time"] = times
+    rsi_df["high"] = rsi_df["rsi"]
+    rsi_df["low"] = rsi_df["rsi"]
+
+    return rsi_df.dropna().reset_index()
+
+
+def _restore_original_pivot_indexes(pivots, rsi_df):
+
+    restored_pivots = []
+
+    for pivot in pivots:
+        original_index = int(rsi_df.loc[pivot["index"], "index"])
+
+        restored_pivots.append({
+            "index": original_index,
+            "time": pivot["time"],
+            "price": pivot["price"]
+        })
+
+    return restored_pivots

@@ -4,7 +4,7 @@ import customtkinter as ctk
 import pandas as pd
 import plotly.graph_objects as go
 from divergence import find_regular_divergences
-from pivots import find_pivots
+from pivots import find_pivots, find_rsi_pivots
 
 
 class SmartTradeChart:
@@ -52,7 +52,10 @@ class SmartTradeChart:
         self.candles = self._prepare_candles(df)
         self.rsi_series = self._calculate_rsi(self.candles["close"])
         self.pivot_highs, self.pivot_lows = find_pivots(self.candles)
-        self.rsi_pivot_highs, self.rsi_pivot_lows = self._find_rsi_pivots()
+        self.rsi_pivot_highs, self.rsi_pivot_lows = find_rsi_pivots(
+            self.rsi_series,
+            self.candles["time"]
+        )
         self.regular_divergences = find_regular_divergences(
             self.candles,
             self.rsi_series,
@@ -250,39 +253,6 @@ class SmartTradeChart:
         rs = avg_gain / avg_loss
 
         return 100 - (100 / (1 + rs))
-
-    def _find_rsi_pivots(self):
-
-        rsi_df = pd.DataFrame({
-            "time": self.candles["time"],
-            "high": self.rsi_series,
-            "low": self.rsi_series
-        }).dropna().reset_index()
-
-        if rsi_df.empty:
-            return [], []
-
-        pivot_highs, pivot_lows = find_pivots(rsi_df)
-
-        return (
-            self._restore_original_pivot_indexes(pivot_highs, rsi_df),
-            self._restore_original_pivot_indexes(pivot_lows, rsi_df)
-        )
-
-    def _restore_original_pivot_indexes(self, pivots, rsi_df):
-
-        restored_pivots = []
-
-        for pivot in pivots:
-            original_index = int(rsi_df.loc[pivot["index"], "index"])
-
-            restored_pivots.append({
-                "index": original_index,
-                "time": pivot["time"],
-                "price": pivot["price"]
-            })
-
-        return restored_pivots
 
     def _prepare_candles(self, df):
 
