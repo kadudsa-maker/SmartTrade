@@ -14,10 +14,20 @@ def _pivot(index, price):
 
 def _df():
 
-    df = pd.DataFrame({"close": list(range(100))})
+    df = pd.DataFrame({
+        "high": [100 + index for index in range(100)],
+        "low": [100 - index for index in range(100)],
+        "close": list(range(100))
+    })
     df.attrs["symbol"] = "TESTUSDT"
 
     return df
+
+
+def _assert_quality(divergence):
+
+    assert set(divergence["quality"]) == {"pivot", "rsi", "distance"}
+    assert divergence["strength"] == 0
 
 
 def test_find_regular_bullish_divergence():
@@ -33,8 +43,7 @@ def test_find_regular_bullish_divergence():
 
     assert len(divergences) == 1
     assert divergences[0]["type"] == "bullish"
-    assert divergences[0]["strength"] == 0
-    assert divergences[0]["quality"] is None
+    _assert_quality(divergences[0])
 
 
 def test_find_regular_bearish_divergence():
@@ -50,6 +59,7 @@ def test_find_regular_bearish_divergence():
 
     assert len(divergences) == 1
     assert divergences[0]["type"] == "bearish"
+    _assert_quality(divergences[0])
 
 
 def test_no_divergence_when_price_pivots_are_too_far_apart():

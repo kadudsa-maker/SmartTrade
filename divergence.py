@@ -1,3 +1,6 @@
+from signal_quality import calculate_signal_quality
+
+
 MAX_PIVOT_DISTANCE = 60
 MAX_PIVOT_ALIGNMENT = 3
 
@@ -62,6 +65,7 @@ def _find_regular_bullish(df, rsi, price_lows, rsi_lows):
                 rsi_start,
                 rsi_end
             )
+            divergence["quality"] = calculate_signal_quality(df, divergence, "low")
             divergences.append(divergence)
             _log_divergence(df, rsi, divergence)
 
@@ -97,6 +101,7 @@ def _find_regular_bearish(df, rsi, price_highs, rsi_highs):
                 rsi_start,
                 rsi_end
             )
+            divergence["quality"] = calculate_signal_quality(df, divergence, "high")
             divergences.append(divergence)
             _log_divergence(df, rsi, divergence)
 
@@ -190,6 +195,8 @@ def _log_divergence(df, rsi, divergence):
     print(f"value: {_rsi_value(rsi, rsi_end)}")
     print("Distance:")
     print(distance)
+    print("Quality:")
+    print(divergence["quality"])
     print("-------------------------------------")
 
 
