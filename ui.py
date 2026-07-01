@@ -1,7 +1,17 @@
 import customtkinter as ctk
+from tkinter import StringVar, messagebox
 from chart import SmartTradeChart
+from config import MIN_VISIBLE_QUALITY, SHOW_EXPIRED_SIGNALS
 from divergence import find_regular_divergences
-from market import get_watchlist, get_klines, calculate_rsi
+from market import (
+    calculate_rsi,
+    get_available_usdt_perpetual_symbols,
+    get_klines,
+    get_top_bybit_symbols,
+    get_watchlist,
+    reset_watchlist,
+    save_watchlist
+)
 from pivots import find_pivots, find_rsi_pivots
 from signal_quality import calculate_quality_score
 from time_utils import current_polish_time, format_polish_time
@@ -20,6 +30,8 @@ GRAY = "#6E7681"
 
 ACTIVE_MAX_AGE = 3
 AGING_MAX_AGE = 10
+SCAN_MODE_WATCHLIST = "watchlist"
+SCAN_MODE_TOP50 = "top50"
 
 
 class SmartTradeUI:
@@ -36,14 +48,21 @@ class SmartTradeUI:
 
         self.selected_symbol = None
         self.selected_interval = "15"
+        self.scan_mode = SCAN_MODE_WATCHLIST
 
-        self.coins = [{"symbol": coin} for coin in get_watchlist()]
+        self.watchlist_symbols = get_watchlist()
+        self.top50_symbols = []
+        self.coins = [{"symbol": coin} for coin in self.watchlist_symbols]
         self.buttons = []
         self.timeframe_buttons = {}
+        self.scan_mode_buttons = {}
         self.best_divergence_label = None
         self.top_time_label = None
         self.bottom_time_label = None
         self.top_timeframe_label = None
+        self.watchlist_scroll = None
+        self.watchlist_title_label = None
+        self.reset_watchlist_button = None
 
         self.refresh_index = 0
 
@@ -94,7 +113,11 @@ class SmartTradeUI:
 
         self.chart.set_candles(df)
         self.update_best_divergence_panel(
-            self.select_best_divergence(self.chart.regular_divergences),
+            self.select_best_signal(
+                self.chart.regular_divergences,
+                len(self.chart.candles),
+                visible_only=True
+            ),
             len(self.chart.candles)
         )
 
@@ -103,6 +126,10 @@ class SmartTradeUI:
         )
 
     def refresh_one_coin(self):
+
+        if not self.coins:
+            self.app.after(1000, self.refresh_one_coin)
+            return
 
         coin = self.coins[self.refresh_index]
 
@@ -123,6 +150,58 @@ class SmartTradeUI:
 
         self.app.after(1000, self.refresh_one_coin)
 
+    def set_scan_mode(self, mode):
+
+        if mode == self.scan_mode:
+            return
+
+        self.scan_mode = mode
+        self.refresh_index = 0
+
+        if mode == SCAN_MODE_TOP50:
+            self.load_top50_scan_symbols()
+        else:
+            self.watchlist_symbols = get_watchlist()
+            self.coins = [{"symbol": coin} for coin in self.watchlist_symbols]
+
+        self.update_scan_mode_buttons()
+        self.build_watchlist_cards()
+
+    def load_top50_scan_symbols(self):
+
+        symbols = get_top_bybit_symbols(50)
+
+        if not symbols:
+            messagebox.showwarning(
+                "SmartTrade",
+                "Nie udało się pobrać Top 50 Bybit. Spróbuj ponownie za chwilę."
+            )
+
+        self.top50_symbols = symbols
+        self.coins = [{"symbol": symbol} for symbol in self.top50_symbols]
+
+    def update_scan_mode_buttons(self):
+
+        for mode, button in self.scan_mode_buttons.items():
+            if mode == self.scan_mode:
+                button.configure(fg_color=BLUE, text_color="#FFFFFF", border_color=BLUE)
+            else:
+                button.configure(
+                    fg_color=PANEL_COLOR,
+                    text_color=MUTED_TEXT_COLOR,
+                    border_color=BORDER_COLOR
+                )
+
+        if self.watchlist_title_label is not None:
+            title = "WATCHLIST" if self.scan_mode == SCAN_MODE_WATCHLIST else "TOP 50 BYBIT"
+            self.watchlist_title_label.configure(text=title)
+
+        if self.reset_watchlist_button is not None:
+            if self.scan_mode == SCAN_MODE_WATCHLIST:
+                self.reset_watchlist_button.configure(state="normal", text_color=TEXT_COLOR)
+            else:
+                self.reset_watchlist_button.configure(state="disabled", text_color=GRAY)
+
     def update_watchlist_coin(self, coin, index):
 
         symbol = coin["symbol"]
@@ -135,7 +214,7 @@ class SmartTradeUI:
         rsi = calculate_rsi(df)
         candles = self.prepare_engine_candles(df)
         divergences = self.find_coin_divergences_from_candles(candles)
-        best_divergence = self.select_best_divergence(divergences)
+        best_divergence = self.select_best_signal(divergences, len(candles))
 
         self.update_watchlist_card(
             index,
@@ -168,23 +247,116 @@ class SmartTradeUI:
             rsi_pivot_lows
         )
 
-    def select_best_divergence(self, divergences):
+    def select_best_divergence(self, divergences, candle_count=None):
+
+        if candle_count is not None:
+            return self.select_best_signal(
+                divergences,
+                candle_count,
+                visible_only=True
+            )
+
+        return self.select_best_signal(divergences)
+
+    def select_best_signal(self, divergences, candle_count=None, visible_only=False):
 
         if not divergences:
             return None
 
+        candidates = divergences
+
+        if visible_only:
+            candidates = [
+                divergence
+                for divergence in divergences
+                if self.is_visible_signal(divergence, candle_count)
+            ]
+
+        if not candidates:
+            return None
+
         return max(
-            divergences,
-            key=lambda divergence: calculate_quality_score(divergence.get("quality"))
+            candidates,
+            key=lambda divergence: self.signal_sort_key(divergence, candle_count)
         )
+
+    def signal_sort_key(self, divergence, candle_count=None):
+
+        status = self.signal_filter_status(divergence, candle_count)
+        quality_score = calculate_quality_score(divergence.get("quality"))
+        freshness = divergence["price_end"]["index"]
+
+        return self.get_signal_priority(status), quality_score, freshness
+
+    def signal_filter_status(self, divergence, candle_count=None):
+
+        if divergence is None:
+            return None
+
+        if candle_count is None:
+            return "FILTERED"
+
+        status, _status_color = self.signal_status(divergence, candle_count)
+        quality_score = calculate_quality_score(divergence.get("quality"))
+
+        if status == "EXPIRED":
+            return "EXPIRED"
+
+        if quality_score < MIN_VISIBLE_QUALITY:
+            return "FILTERED"
+
+        return status
+
+    def get_signal_priority(self, status):
+
+        priorities = {
+            "ACTIVE": 3,
+            "AGING": 2,
+            "FILTERED": 1,
+            "EXPIRED": 1
+        }
+
+        return priorities.get(status, 0)
+
+    def is_visible_signal(self, divergence, candle_count):
+
+        quality_score = calculate_quality_score(divergence.get("quality"))
+
+        if quality_score < MIN_VISIBLE_QUALITY:
+            return False
+
+        status, _status_color = self.signal_status(divergence, candle_count)
+
+        if status == "EXPIRED" and not SHOW_EXPIRED_SIGNALS:
+            return False
+
+        return True
+
+    def is_visible_divergence(self, divergence, candle_count):
+
+        return self.is_visible_signal(divergence, candle_count)
 
     def update_watchlist_card(self, index, symbol, rsi, divergence, candle_count):
 
         card = self.buttons[index]
-        status, status_color = self.signal_status(divergence, candle_count)
-        setup_text, setup_color = self.signal_setup_text(divergence)
-        signal_time = self.signal_time_text(divergence)
-        age_text = self.signal_age_text(divergence, candle_count)
+
+        if divergence is None:
+            status = ""
+            status_color = GRAY
+            setup_text = "—"
+            setup_color = MUTED_TEXT_COLOR
+            signal_time = ""
+            age_text = ""
+        elif self.is_visible_signal(divergence, candle_count):
+            status, status_color = self.signal_status(divergence, candle_count)
+            status = self.format_status_label(status)
+            setup_text, setup_color = self.signal_setup_text(divergence)
+            signal_time = self.signal_time_text(divergence)
+            age_text = self.signal_age_text(divergence, candle_count)
+        else:
+            status, status_color, setup_text, setup_color, signal_time, age_text = (
+                self.format_filtered_signal(divergence, candle_count)
+            )
 
         card["symbol"].configure(text=symbol)
         card["status"].configure(text=status, text_color=status_color)
@@ -192,6 +364,35 @@ class SmartTradeUI:
         card["time"].configure(text=signal_time)
         card["age"].configure(text=age_text)
         card["rsi"].configure(text=f"RSI {rsi}")
+
+    def format_filtered_signal(self, divergence, candle_count):
+
+        status, _status_color = self.signal_status(divergence, candle_count)
+        setup_text, setup_color = self.signal_setup_text(divergence)
+        signal_time = self.signal_time_text(divergence)
+        age_text = self.signal_age_text(divergence, candle_count)
+
+        if status == "EXPIRED":
+            filter_status = "⚪ Expired"
+        else:
+            filter_status = "⚪ Filtered"
+
+        return filter_status, GRAY, setup_text, setup_color, signal_time, age_text
+
+    def format_status_label(self, status):
+
+        icons = {
+            "ACTIVE": "🟢",
+            "AGING": "🟡",
+            "EXPIRED": "⚪"
+        }
+
+        icon = icons.get(status)
+
+        if icon is None:
+            return status
+
+        return f"{icon} {status}"
 
     def format_watchlist_button(self, symbol, rsi, divergence):
 
@@ -284,7 +485,7 @@ class SmartTradeUI:
 
         return 100 - (100 / (1 + rs))
 
-    def create_watchlist_card(self, parent, symbol):
+    def create_watchlist_card(self, parent, symbol, index, editable=True):
 
         frame = ctk.CTkFrame(
             parent,
@@ -294,8 +495,30 @@ class SmartTradeUI:
             corner_radius=8
         )
 
+        header = ctk.CTkFrame(frame, fg_color="transparent")
+        header.pack(fill="x", padx=10, pady=(8, 0))
+
+        symbol_label = self.create_card_label(header, symbol, 14, TEXT_COLOR, True)
+        symbol_label.pack(side="left", fill="x", expand=True)
+
+        if editable:
+            edit_button = ctk.CTkButton(
+                header,
+                text="✎",
+                width=28,
+                height=24,
+                fg_color=PANEL_COLOR,
+                hover_color=BORDER_COLOR,
+                border_color=BORDER_COLOR,
+                border_width=1,
+                text_color=MUTED_TEXT_COLOR,
+                corner_radius=6,
+                command=lambda card_index=index: self.open_coin_selector(card_index)
+            )
+            edit_button.pack(side="right")
+
         labels = {
-            "symbol": self.create_card_label(frame, symbol, 14, TEXT_COLOR, True),
+            "symbol": symbol_label,
             "status": self.create_card_label(frame, "", 11, GRAY, True),
             "setup": self.create_card_label(frame, "—", 13, MUTED_TEXT_COLOR, True),
             "time": self.create_card_label(frame, "", 11, MUTED_TEXT_COLOR, False),
@@ -303,7 +526,6 @@ class SmartTradeUI:
             "rsi": self.create_card_label(frame, "RSI —", 12, TEXT_COLOR, False)
         }
 
-        labels["symbol"].pack(fill="x", padx=10, pady=(8, 0))
         labels["status"].pack(fill="x", padx=10, pady=(1, 0))
         labels["setup"].pack(fill="x", padx=10, pady=(1, 0))
         labels["time"].pack(fill="x", padx=10)
@@ -330,10 +552,229 @@ class SmartTradeUI:
 
     def bind_card_click(self, widget, symbol):
 
+        if isinstance(widget, ctk.CTkButton):
+            return
+
         widget.bind("<Button-1>", lambda _event, s=symbol: self.select_coin(s))
 
         for child in widget.winfo_children():
             self.bind_card_click(child, symbol)
+
+    def open_coin_selector(self, index):
+
+        current_symbol = self.coins[index]["symbol"]
+
+        try:
+            symbols = get_available_usdt_perpetual_symbols()
+        except Exception as error:
+            messagebox.showerror(
+                "SmartTrade",
+                f"Nie udało się pobrać listy coinów z Bybit.\n\n{error}"
+            )
+            return
+
+        if not symbols:
+            messagebox.showwarning(
+                "SmartTrade",
+                "Bybit nie zwrócił żadnych kontraktów USDT Perpetual."
+            )
+            return
+
+        window = ctk.CTkToplevel(self.app)
+        window.title("Wybierz coina")
+        window.geometry("360x520")
+        window.configure(fg_color=BG_COLOR)
+        window.transient(self.app)
+        window.grab_set()
+
+        ctk.CTkLabel(
+            window,
+            text=f"Zmień {current_symbol}",
+            font=("Arial", 18, "bold"),
+            text_color=TEXT_COLOR
+        ).pack(pady=(14, 10))
+
+        search_frame = ctk.CTkFrame(window, fg_color="transparent")
+        search_frame.pack(fill="x", padx=12, pady=(0, 10))
+
+        ctk.CTkLabel(
+            search_frame,
+            text="🔍 Szukaj",
+            font=("Arial", 12, "bold"),
+            text_color=MUTED_TEXT_COLOR
+        ).pack(anchor="w")
+
+        search_var = StringVar()
+        search_entry = ctk.CTkEntry(
+            search_frame,
+            textvariable=search_var,
+            fg_color=PANEL_COLOR,
+            border_color=BORDER_COLOR,
+            border_width=1,
+            text_color=TEXT_COLOR,
+            placeholder_text="BTC, SOL, SUI..."
+        )
+        search_entry.pack(fill="x", pady=(4, 0))
+
+        scroll = ctk.CTkScrollableFrame(
+            window,
+            fg_color=PANEL_COLOR,
+            scrollbar_button_color=BORDER_COLOR,
+            scrollbar_button_hover_color=GRAY
+        )
+        scroll.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+
+        def render_symbols(*_args):
+            query = search_var.get().strip().upper()
+            filtered_symbols = [
+                symbol
+                for symbol in symbols
+                if query in symbol.upper()
+            ]
+
+            for child in scroll.winfo_children():
+                child.destroy()
+
+            for symbol in filtered_symbols:
+                button = ctk.CTkButton(
+                    scroll,
+                    text=symbol,
+                    height=34,
+                    fg_color=BG_COLOR,
+                    hover_color=BORDER_COLOR,
+                    border_color=BORDER_COLOR,
+                    border_width=1,
+                    text_color=TEXT_COLOR,
+                    corner_radius=6,
+                    command=lambda value=symbol, dialog=window: self.replace_watchlist_coin(
+                        index,
+                        value,
+                        dialog
+                    )
+                )
+                button.pack(fill="x", padx=6, pady=3)
+
+        search_var.trace_add("write", render_symbols)
+        render_symbols()
+        search_entry.focus()
+
+    def replace_watchlist_coin(self, index, new_symbol, dialog):
+
+        current_symbol = self.coins[index]["symbol"]
+        updated_symbols = [coin["symbol"] for coin in self.coins]
+        updated_symbols[index] = new_symbol
+
+        try:
+            save_watchlist(updated_symbols)
+        except Exception as error:
+            messagebox.showerror(
+                "SmartTrade",
+                f"Nie udało się zapisać watchlisty.\n\n{error}"
+            )
+            return
+
+        if self.selected_symbol == current_symbol:
+            self.selected_symbol = new_symbol
+
+        dialog.destroy()
+        self.reload_watchlist()
+
+        if self.selected_symbol:
+            self.refresh_selected()
+
+    def reset_watchlist_to_top20(self):
+
+        confirmed = messagebox.askyesno(
+            "SmartTrade",
+            "Nadpisać watchlistę aktualnym Top20 Bybit według 24h Turnover?"
+        )
+
+        if not confirmed:
+            return
+
+        try:
+            reset_watchlist()
+        except Exception as error:
+            messagebox.showerror(
+                "SmartTrade",
+                f"Nie udało się zresetować watchlisty.\n\n{error}"
+            )
+            return
+
+        self.selected_symbol = None
+        self.reload_watchlist()
+
+    def reload_watchlist(self):
+
+        self.watchlist_symbols = get_watchlist()
+
+        if self.scan_mode == SCAN_MODE_WATCHLIST:
+            self.coins = [{"symbol": coin} for coin in self.watchlist_symbols]
+
+        self.refresh_index = 0
+
+        self.build_watchlist_cards()
+
+    def build_watchlist_cards(self):
+
+        if self.watchlist_scroll is None:
+            return
+
+        for card in self.buttons:
+            card["frame"].destroy()
+
+        self.buttons = []
+
+        editable = self.scan_mode == SCAN_MODE_WATCHLIST
+
+        for index, coin in enumerate(self.coins):
+            card = self.create_watchlist_card(
+                self.watchlist_scroll,
+                coin["symbol"],
+                index,
+                editable=editable
+            )
+
+            card["frame"].pack(fill="x", padx=8, pady=5)
+            self.buttons.append(card)
+
+    def build_scan_mode_controls(self):
+
+        container = ctk.CTkFrame(self.watchlist_scroll, fg_color="transparent")
+        container.pack(fill="x", padx=8, pady=(0, 8))
+
+        ctk.CTkLabel(
+            container,
+            text="SCAN MODE",
+            font=("Arial", 11, "bold"),
+            text_color=MUTED_TEXT_COLOR
+        ).pack(anchor="w", pady=(0, 4))
+
+        button_row = ctk.CTkFrame(container, fg_color="transparent")
+        button_row.pack(fill="x")
+
+        modes = [
+            (SCAN_MODE_WATCHLIST, "Watchlist"),
+            (SCAN_MODE_TOP50, "Top 50")
+        ]
+
+        for mode, label in modes:
+            button = ctk.CTkButton(
+                button_row,
+                text=label,
+                height=30,
+                fg_color=PANEL_COLOR,
+                hover_color=BORDER_COLOR,
+                border_color=BORDER_COLOR,
+                border_width=1,
+                text_color=MUTED_TEXT_COLOR,
+                corner_radius=8,
+                command=lambda value=mode: self.set_scan_mode(value)
+            )
+            button.pack(side="left", fill="x", expand=True, padx=2)
+            self.scan_mode_buttons[mode] = button
+
+        self.update_scan_mode_buttons()
 
     def build_top_bar(self):
 
@@ -498,31 +939,40 @@ class SmartTradeUI:
         )
         self.right.grid(row=0,column=2,sticky="nsew",padx=12,pady=12)
 
-        scroll = ctk.CTkScrollableFrame(
+        self.watchlist_scroll = ctk.CTkScrollableFrame(
             self.left,
             fg_color=PANEL_COLOR,
             scrollbar_button_color=BORDER_COLOR,
             scrollbar_button_hover_color=GRAY
         )
-        scroll.pack(fill="both", expand=True)
+        self.watchlist_scroll.pack(fill="both", expand=True)
 
-        ctk.CTkLabel(
-            scroll,
+        self.watchlist_title_label = ctk.CTkLabel(
+            self.watchlist_scroll,
             text="WATCHLIST",
             font=("Arial",18,"bold"),
             text_color=TEXT_COLOR
-        ).pack(pady=(14, 10))
+        )
+        self.watchlist_title_label.pack(pady=(14, 10))
 
-        for coin in self.coins:
+        self.build_scan_mode_controls()
 
-            card = self.create_watchlist_card(
-                scroll,
-                coin["symbol"]
-            )
+        self.reset_watchlist_button = ctk.CTkButton(
+            self.watchlist_scroll,
+            text="↻ Reset do Top20 Bybit",
+            height=34,
+            fg_color=PANEL_COLOR,
+            hover_color=BORDER_COLOR,
+            border_color=BORDER_COLOR,
+            border_width=1,
+            text_color=TEXT_COLOR,
+            corner_radius=8,
+            command=self.reset_watchlist_to_top20
+        )
+        self.reset_watchlist_button.pack(fill="x", padx=8, pady=(0, 8))
 
-            card["frame"].pack(fill="x", padx=8, pady=5)
-
-            self.buttons.append(card)
+        self.build_watchlist_cards()
+        self.update_scan_mode_buttons()
 
         self.build_top_bar()
         self.build_timeframe_bar()
