@@ -1,4 +1,5 @@
 import customtkinter as ctk
+from chart import SmartTradeChart
 from market import get_watchlist, get_klines, calculate_rsi
 
 
@@ -60,6 +61,8 @@ class SmartTradeUI:
         rsi = calculate_rsi(df)
 
         price = round(df["close"].iloc[-1], 2)
+
+        self.chart.set_candles(df)
 
         self.center_label.configure(
             text=f"{self.selected_symbol}\n\nCena: {price}\n\nRSI: {rsi}"
@@ -147,6 +150,9 @@ class SmartTradeUI:
             self.buttons.append(button)
 
         self.build_timeframe_bar()
+
+        self.chart = SmartTradeChart(self.center)
+        self.chart.pack(fill="both", expand=True, padx=10, pady=(0, 10))
 
         self.status_bar = ctk.CTkFrame(
             self.center,
