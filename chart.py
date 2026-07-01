@@ -180,7 +180,8 @@ class SmartTradeChart:
 
         for divergence in self.regular_divergences:
             color, label, name = self._divergence_style(divergence["type"])
-            self._add_divergence_trace_pair(divergence, color, name, label)
+            quality_label = self._divergence_label_with_quality(label, divergence)
+            self._add_divergence_trace_pair(divergence, color, name, quality_label)
 
     def _add_divergence_trace_pair(self, divergence, color, name, label):
 
@@ -226,6 +227,22 @@ class SmartTradeChart:
             return "#26a69a", "Bull Div", "Regular Bullish"
 
         return "#ef5350", "Bear Div", "Regular Bearish"
+
+    def _divergence_label_with_quality(self, label, divergence):
+
+        quality_score = self._quality_score(divergence)
+
+        return f"{label}\nQ: {quality_score}"
+
+    def _quality_score(self, divergence):
+
+        quality = divergence.get("quality") or {}
+
+        pivot = quality.get("pivot", 0)
+        rsi = quality.get("rsi", 0)
+        distance = quality.get("distance", 0)
+
+        return round((pivot + rsi + distance) / 3)
 
     def _add_rsi_levels(self):
 
@@ -536,10 +553,11 @@ class SmartTradeChart:
 
         for divergence in self.regular_divergences:
             color, label, _name = self._divergence_style(divergence["type"])
+            quality_label = self._divergence_label_with_quality(label, divergence)
             self._draw_divergence_pair(
                 divergence,
                 color,
-                label,
+                quality_label,
                 first_visible_index,
                 len(visible_candles),
                 high,
