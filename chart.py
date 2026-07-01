@@ -3,6 +3,7 @@ import tkinter as tk
 import customtkinter as ctk
 import pandas as pd
 import plotly.graph_objects as go
+from divergence import find_regular_divergences
 from pivots import find_pivots
 
 
@@ -18,6 +19,10 @@ class SmartTradeChart:
         self.rsi_series = pd.Series(dtype=float)
         self.pivot_highs = []
         self.pivot_lows = []
+        self.rsi_pivot_highs = []
+        self.rsi_pivot_lows = []
+        self.bullish_divergences = []
+        self.bearish_divergences = []
         self.divergence_lines = []
         self.rsi_divergence_lines = []
 
@@ -50,6 +55,13 @@ class SmartTradeChart:
         self.candles = self._prepare_candles(df)
         self.rsi_series = self._calculate_rsi(self.candles["close"])
         self.pivot_highs, self.pivot_lows = find_pivots(self.candles)
+        self.rsi_pivot_highs, self.rsi_pivot_lows = self._find_rsi_pivots()
+        self.bullish_divergences, self.bearish_divergences = find_regular_divergences(
+            self.pivot_highs,
+            self.pivot_lows,
+            self.rsi_pivot_highs,
+            self.rsi_pivot_lows
+        )
 
         if self.candles.empty:
             return
@@ -105,6 +117,8 @@ class SmartTradeChart:
 
         self._add_rsi_trace()
         self._add_pivot_markers()
+        self._add_rsi_pivot_markers()
+        self._add_regular_divergence_traces()
         self._add_divergence_traces()
         self._add_rsi_levels()
 
@@ -151,6 +165,74 @@ class SmartTradeChart:
                 )
             )
 
+    def _add_rsi_pivot_markers(self):
+
+        if self.rsi_pivot_highs:
+            self.figure.add_trace(
+                go.Scatter(
+                    x=[pd.to_datetime(pivot["time"], unit="s") for pivot in self.rsi_pivot_highs],
+                    y=[pivot["price"] for pivot in self.rsi_pivot_highs],
+                    mode="markers",
+                    marker=dict(color="#ef5350", size=7),
+                    name="RSI Pivot High",
+                    yaxis="y2"
+                )
+            )
+
+        if self.rsi_pivot_lows:
+            self.figure.add_trace(
+                go.Scatter(
+                    x=[pd.to_datetime(pivot["time"], unit="s") for pivot in self.rsi_pivot_lows],
+                    y=[pivot["price"] for pivot in self.rsi_pivot_lows],
+                    mode="markers",
+                    marker=dict(color="#26a69a", size=7),
+                    name="RSI Pivot Low",
+                    yaxis="y2"
+                )
+            )
+
+    def _add_regular_divergence_traces(self):
+
+        for divergence in self.bullish_divergences:
+            self._add_divergence_trace_pair(divergence, "#26a69a", "Regular Bullish")
+
+        for divergence in self.bearish_divergences:
+            self._add_divergence_trace_pair(divergence, "#ef5350", "Regular Bearish")
+
+    def _add_divergence_trace_pair(self, divergence, color, name):
+
+        price_start = divergence["price_line"]["start"]
+        price_end = divergence["price_line"]["end"]
+        rsi_start = divergence["rsi_line"]["start"]
+        rsi_end = divergence["rsi_line"]["end"]
+
+        self.figure.add_trace(
+            go.Scatter(
+                x=[
+                    pd.to_datetime(price_start["time"], unit="s"),
+                    pd.to_datetime(price_end["time"], unit="s")
+                ],
+                y=[price_start["price"], price_end["price"]],
+                mode="lines",
+                line=dict(color=color, width=2),
+                name=f"{name} Price"
+            )
+        )
+
+        self.figure.add_trace(
+            go.Scatter(
+                x=[
+                    pd.to_datetime(rsi_start["time"], unit="s"),
+                    pd.to_datetime(rsi_end["time"], unit="s")
+                ],
+                y=[rsi_start["price"], rsi_end["price"]],
+                mode="lines",
+                line=dict(color=color, width=2),
+                name=f"{name} RSI",
+                yaxis="y2"
+            )
+        )
+
     def _add_rsi_levels(self):
 
         for level in [30, 50, 70]:
@@ -177,6 +259,39 @@ class SmartTradeChart:
         rs = avg_gain / avg_loss
 
         return 100 - (100 / (1 + rs))
+
+    def _find_rsi_pivots(self):
+
+        rsi_df = pd.DataFrame({
+            "time": self.candles["time"],
+            "high": self.rsi_series,
+            "low": self.rsi_series
+        }).dropna().reset_index()
+
+        if rsi_df.empty:
+            return [], []
+
+        pivot_highs, pivot_lows = find_pivots(rsi_df)
+
+        return (
+            self._restore_original_pivot_indexes(pivot_highs, rsi_df),
+            self._restore_original_pivot_indexes(pivot_lows, rsi_df)
+        )
+
+    def _restore_original_pivot_indexes(self, pivots, rsi_df):
+
+        restored_pivots = []
+
+        for pivot in pivots:
+            original_index = int(rsi_df.loc[pivot["index"], "index"])
+
+            restored_pivots.append({
+                "index": original_index,
+                "time": pivot["time"],
+                "price": pivot["price"]
+            })
+
+        return restored_pivots
 
     def _prepare_candles(self, df):
 
@@ -265,6 +380,18 @@ class SmartTradeChart:
 
         self._draw_rsi_line(visible_rsi, step, padding, rsi_top, rsi_bottom)
         self._draw_pivot_markers(visible_candles, high, low, step, padding, price_top, candle_area_height)
+        self._draw_rsi_pivot_markers(visible_candles, step, padding, rsi_top, rsi_bottom)
+        self._draw_regular_divergences(
+            visible_candles,
+            high,
+            low,
+            step,
+            padding,
+            price_top,
+            candle_area_height,
+            rsi_top,
+            rsi_bottom
+        )
         self._draw_rsi_divergences(step, padding, rsi_top, rsi_bottom)
         self._draw_crosshair(width, price_top, rsi_bottom, padding)
 
@@ -390,6 +517,148 @@ class SmartTradeChart:
                 fill="#26a69a",
                 outline="#26a69a"
             )
+
+    def _draw_rsi_pivot_markers(self, visible_candles, step, padding, top, bottom):
+
+        first_visible_index = len(self.candles) - len(visible_candles)
+
+        for pivot in self.rsi_pivot_highs:
+            visible_index = pivot["index"] - first_visible_index
+
+            if not 0 <= visible_index < len(visible_candles):
+                continue
+
+            x = padding + (visible_index * step) + (step / 2)
+            y = self._rsi_to_y(pivot["price"], top, bottom) - 6
+
+            self.canvas.create_oval(
+                x - 4,
+                y - 4,
+                x + 4,
+                y + 4,
+                fill="#ef5350",
+                outline="#ef5350"
+            )
+
+        for pivot in self.rsi_pivot_lows:
+            visible_index = pivot["index"] - first_visible_index
+
+            if not 0 <= visible_index < len(visible_candles):
+                continue
+
+            x = padding + (visible_index * step) + (step / 2)
+            y = self._rsi_to_y(pivot["price"], top, bottom) + 6
+
+            self.canvas.create_oval(
+                x - 4,
+                y - 4,
+                x + 4,
+                y + 4,
+                fill="#26a69a",
+                outline="#26a69a"
+            )
+
+    def _draw_regular_divergences(
+        self,
+        visible_candles,
+        high,
+        low,
+        step,
+        padding,
+        price_top,
+        price_height,
+        rsi_top,
+        rsi_bottom
+    ):
+
+        first_visible_index = len(self.candles) - len(visible_candles)
+
+        for divergence in self.bullish_divergences:
+            self._draw_divergence_pair(
+                divergence,
+                "#26a69a",
+                first_visible_index,
+                len(visible_candles),
+                high,
+                low,
+                step,
+                padding,
+                price_top,
+                price_height,
+                rsi_top,
+                rsi_bottom
+            )
+
+        for divergence in self.bearish_divergences:
+            self._draw_divergence_pair(
+                divergence,
+                "#ef5350",
+                first_visible_index,
+                len(visible_candles),
+                high,
+                low,
+                step,
+                padding,
+                price_top,
+                price_height,
+                rsi_top,
+                rsi_bottom
+            )
+
+    def _draw_divergence_pair(
+        self,
+        divergence,
+        color,
+        first_visible_index,
+        visible_count,
+        high,
+        low,
+        step,
+        padding,
+        price_top,
+        price_height,
+        rsi_top,
+        rsi_bottom
+    ):
+
+        price_start = divergence["price_line"]["start"]
+        price_end = divergence["price_line"]["end"]
+        rsi_start = divergence["rsi_line"]["start"]
+        rsi_end = divergence["rsi_line"]["end"]
+
+        if not self._is_line_visible(price_start, price_end, first_visible_index, visible_count):
+            return
+
+        self.canvas.create_line(
+            self._pivot_x(price_start, first_visible_index, step, padding),
+            self._price_to_y(price_start["price"], high, low, price_top, price_height),
+            self._pivot_x(price_end, first_visible_index, step, padding),
+            self._price_to_y(price_end["price"], high, low, price_top, price_height),
+            fill=color,
+            width=2
+        )
+
+        self.canvas.create_line(
+            self._pivot_x(rsi_start, first_visible_index, step, padding),
+            self._rsi_to_y(rsi_start["price"], rsi_top, rsi_bottom),
+            self._pivot_x(rsi_end, first_visible_index, step, padding),
+            self._rsi_to_y(rsi_end["price"], rsi_top, rsi_bottom),
+            fill=color,
+            width=2
+        )
+
+    def _is_line_visible(self, start_pivot, end_pivot, first_visible_index, visible_count):
+
+        first = first_visible_index
+        last = first_visible_index + visible_count - 1
+
+        return first <= start_pivot["index"] <= last and first <= end_pivot["index"] <= last
+
+    def _pivot_x(self, pivot, first_visible_index, step, padding):
+
+        visible_index = pivot["index"] - first_visible_index
+
+        return padding + (visible_index * step) + (step / 2)
 
     def _draw_rsi_divergences(self, step, padding, top, bottom):
 
