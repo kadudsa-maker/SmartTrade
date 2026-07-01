@@ -5,13 +5,35 @@ import pandas as pd
 import plotly.graph_objects as go
 from divergence import find_regular_divergences
 from pivots import find_pivots, find_rsi_pivots
+from signal_quality import calculate_quality_score
+from time_utils import format_polish_time
+
+
+BG_COLOR = "#111315"
+PANEL_COLOR = "#181A1F"
+BORDER_COLOR = "#2A2E36"
+TEXT_COLOR = "#EAEAEA"
+MUTED_TEXT_COLOR = "#8D96A0"
+GREEN = "#2ECC71"
+RED = "#E74C3C"
+YELLOW = "#F1C40F"
+GRAY = "#6E7681"
+
+ACTIVE_MAX_AGE = 3
+AGING_MAX_AGE = 10
 
 
 class SmartTradeChart:
 
     def __init__(self, parent):
 
-        self.frame = ctk.CTkFrame(parent)
+        self.frame = ctk.CTkFrame(
+            parent,
+            fg_color=PANEL_COLOR,
+            border_color=BORDER_COLOR,
+            border_width=1,
+            corner_radius=10
+        )
 
         self.figure = go.Figure()
         self.candles = pd.DataFrame()
@@ -25,7 +47,7 @@ class SmartTradeChart:
 
         self.canvas = tk.Canvas(
             self.frame,
-            bg="#111111",
+            bg=BG_COLOR,
             highlightthickness=0
         )
         self.canvas.pack(fill="both", expand=True)
@@ -83,6 +105,9 @@ class SmartTradeChart:
             template="plotly_dark",
             margin=dict(l=0, r=0, t=0, b=0),
             xaxis_rangeslider_visible=False,
+            paper_bgcolor=BG_COLOR,
+            plot_bgcolor=BG_COLOR,
+            font=dict(color=TEXT_COLOR),
             yaxis=dict(domain=[0.32, 1.0]),
             yaxis2=dict(domain=[0.0, 0.24], range=[0, 100], title="RSI")
         )
@@ -189,18 +214,23 @@ class SmartTradeChart:
         price_end = divergence["price_end"]
         rsi_start = divergence["rsi_start"]
         rsi_end = divergence["rsi_end"]
+        price_mid_time = self._mid_time(price_start, price_end)
+        price_mid_value = (price_start["price"] + price_end["price"]) / 2
+        rsi_mid_time = self._mid_time(rsi_start, rsi_end)
+        rsi_mid_value = (rsi_start["price"] + rsi_end["price"]) / 2
 
         self.figure.add_trace(
             go.Scatter(
                 x=[
                     pd.to_datetime(price_start["time"], unit="s"),
+                    pd.to_datetime(price_mid_time, unit="s"),
                     pd.to_datetime(price_end["time"], unit="s")
                 ],
-                y=[price_start["price"], price_end["price"]],
+                y=[price_start["price"], price_mid_value, price_end["price"]],
                 mode="lines+text",
                 line=dict(color=color, width=2),
-                text=["", label],
-                textposition="top center",
+                text=["", label, ""],
+                textposition="middle center",
                 name=f"{name} Price"
             )
         )
@@ -209,13 +239,14 @@ class SmartTradeChart:
             go.Scatter(
                 x=[
                     pd.to_datetime(rsi_start["time"], unit="s"),
+                    pd.to_datetime(rsi_mid_time, unit="s"),
                     pd.to_datetime(rsi_end["time"], unit="s")
                 ],
-                y=[rsi_start["price"], rsi_end["price"]],
+                y=[rsi_start["price"], rsi_mid_value, rsi_end["price"]],
                 mode="lines+text",
                 line=dict(color=color, width=2),
-                text=["", label],
-                textposition="top center",
+                text=["", label, ""],
+                textposition="middle center",
                 name=f"{name} RSI",
                 yaxis="y2"
             )
@@ -231,18 +262,34 @@ class SmartTradeChart:
     def _divergence_label_with_quality(self, label, divergence):
 
         quality_score = self._quality_score(divergence)
+        signal_time = format_polish_time(divergence["price_end"]["time"])
+        status = self._signal_status(divergence)
 
-        return f"{label}\nQ: {quality_score}"
+        return f"{label}\n{status}\nQ: {quality_score}\n{signal_time} PL"
 
     def _quality_score(self, divergence):
 
-        quality = divergence.get("quality") or {}
+        return calculate_quality_score(divergence.get("quality"))
 
-        pivot = quality.get("pivot", 0)
-        rsi = quality.get("rsi", 0)
-        distance = quality.get("distance", 0)
+    def _signal_status(self, divergence):
 
-        return round((pivot + rsi + distance) / 3)
+        age = self._signal_age(divergence)
+
+        if age <= ACTIVE_MAX_AGE:
+            return "ACTIVE"
+
+        if age <= AGING_MAX_AGE:
+            return "AGING"
+
+        return "EXPIRED"
+
+    def _signal_age(self, divergence):
+
+        return max(0, len(self.candles) - 1 - divergence["price_end"]["index"])
+
+    def _mid_time(self, start, end):
+
+        return (float(start["time"]) + float(end["time"])) / 2
 
     def _add_rsi_levels(self):
 
@@ -385,7 +432,7 @@ class SmartTradeChart:
 
     def _draw_price_grid(self, width, top, bottom, padding):
 
-        grid_color = "#2b2b2b"
+        grid_color = BORDER_COLOR
 
         for index in range(5):
             y = top + index * ((bottom - top) / 4)
@@ -470,12 +517,12 @@ class SmartTradeChart:
             y = self._price_to_y(pivot["price"], high, low, top, chart_height) - 8
 
             self.canvas.create_oval(
-                x - 4,
-                y - 4,
-                x + 4,
-                y + 4,
-                fill="#ef5350",
-                outline="#ef5350"
+                x - 3,
+                y - 3,
+                x + 3,
+                y + 3,
+                fill=RED,
+                outline=RED
             )
 
         for pivot in self.pivot_lows:
@@ -488,12 +535,12 @@ class SmartTradeChart:
             y = self._price_to_y(pivot["price"], high, low, top, chart_height) + 8
 
             self.canvas.create_oval(
-                x - 4,
-                y - 4,
-                x + 4,
-                y + 4,
-                fill="#26a69a",
-                outline="#26a69a"
+                x - 3,
+                y - 3,
+                x + 3,
+                y + 3,
+                fill=GREEN,
+                outline=GREEN
             )
 
     def _draw_rsi_pivot_markers(self, visible_candles, step, padding, top, bottom):
@@ -510,12 +557,12 @@ class SmartTradeChart:
             y = self._rsi_to_y(pivot["price"], top, bottom) - 6
 
             self.canvas.create_oval(
-                x - 4,
-                y - 4,
-                x + 4,
-                y + 4,
-                fill="#ef5350",
-                outline="#ef5350"
+                x - 3,
+                y - 3,
+                x + 3,
+                y + 3,
+                fill=RED,
+                outline=RED
             )
 
         for pivot in self.rsi_pivot_lows:
@@ -528,12 +575,12 @@ class SmartTradeChart:
             y = self._rsi_to_y(pivot["price"], top, bottom) + 6
 
             self.canvas.create_oval(
-                x - 4,
-                y - 4,
-                x + 4,
-                y + 4,
-                fill="#26a69a",
-                outline="#26a69a"
+                x - 3,
+                y - 3,
+                x + 3,
+                y + 3,
+                fill=GREEN,
+                outline=GREEN
             )
 
     def _draw_regular_divergences(
@@ -613,8 +660,8 @@ class SmartTradeChart:
             width=2
         )
         self.canvas.create_text(
-            price_end_x,
-            price_end_y - 12,
+            (price_start_x + price_end_x) / 2,
+            ((price_start_y + price_end_y) / 2) - 14,
             text=label,
             fill=color,
             font=("Arial", 9, "bold")
@@ -629,8 +676,8 @@ class SmartTradeChart:
             width=2
         )
         self.canvas.create_text(
-            rsi_end_x,
-            rsi_end_y - 12,
+            (rsi_start_x + rsi_end_x) / 2,
+            ((rsi_start_y + rsi_end_y) / 2) - 14,
             text=label,
             fill=color,
             font=("Arial", 9, "bold")

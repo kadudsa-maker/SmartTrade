@@ -60,6 +60,18 @@ def calculate_signal_quality(df, divergence, price_pivot_type):
     }
 
 
+def calculate_quality_score(quality):
+
+    if not quality:
+        return 0
+
+    pivot = quality.get("pivot", 0)
+    rsi = quality.get("rsi", 0)
+    distance = quality.get("distance", 0)
+
+    return round((pivot + rsi + distance) / 3)
+
+
 def _calculate_divergence_pivot_strength(df, divergence, price_pivot_type):
 
     first_strength = calculate_pivot_strength(
