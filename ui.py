@@ -1,4 +1,5 @@
 import customtkinter as ctk
+import time
 from tkinter import StringVar, messagebox
 from chart import SmartTradeChart
 from config import MIN_VISIBLE_QUALITY, SHOW_EXPIRED_SIGNALS
@@ -30,6 +31,10 @@ GRAY = "#6E7681"
 
 ACTIVE_MAX_AGE = 3
 AGING_MAX_AGE = 10
+SCAN_INTERVAL_SECONDS = 1
+SCAN_BATCH_SIZE = 3
+SCAN_INTERVAL_MS = 1000
+TOP50_SORT_INTERVAL_MS = 5000
 SCAN_MODE_WATCHLIST = "watchlist"
 SCAN_MODE_TOP50 = "top50"
 
@@ -52,6 +57,7 @@ class SmartTradeUI:
 
         self.watchlist_symbols = get_watchlist()
         self.top50_symbols = []
+        self.top50_results = {}
         self.coins = [{"symbol": coin} for coin in self.watchlist_symbols]
         self.buttons = []
         self.timeframe_buttons = {}
@@ -60,19 +66,32 @@ class SmartTradeUI:
         self.top_time_label = None
         self.bottom_time_label = None
         self.top_timeframe_label = None
+        self.last_scan_label = None
+        self.next_scan_label = None
+        self.scan_progress_label = None
         self.watchlist_scroll = None
         self.watchlist_title_label = None
         self.reset_watchlist_button = None
 
         self.refresh_index = 0
+        self.next_scan_seconds = SCAN_INTERVAL_SECONDS
+        self.last_top50_sort_at = 0
 
         self.build_ui()
 
     def select_timeframe(self, interval):
 
         self.selected_interval = interval
+        self.refresh_index = 0
+        self.top50_results = {}
+        self.reset_scan_countdown()
+
+        if self.scan_mode == SCAN_MODE_TOP50:
+            self.coins = [{"symbol": symbol} for symbol in self.top50_symbols]
+            self.build_watchlist_cards()
 
         self.update_timeframe_buttons()
+        self.update_scan_progress()
         self.refresh_selected()
 
     def update_timeframe_buttons(self):
@@ -113,7 +132,7 @@ class SmartTradeUI:
 
         self.chart.set_candles(df)
         self.update_best_divergence_panel(
-            self.select_best_signal(
+            self.select_freshest_best_signal(
                 self.chart.regular_divergences,
                 len(self.chart.candles),
                 visible_only=True
@@ -127,28 +146,83 @@ class SmartTradeUI:
 
     def refresh_one_coin(self):
 
-        if not self.coins:
-            self.app.after(1000, self.refresh_one_coin)
+        self.scan_one_coin()
+
+    def scan_one_coin(self):
+
+        scan_symbols = self.get_scan_symbols()
+
+        if not scan_symbols:
+            self.reset_scan_countdown()
+            self.app.after(SCAN_INTERVAL_MS, self.scan_one_coin)
             return
 
-        coin = self.coins[self.refresh_index]
+        scanned_count = 0
 
-        try:
+        while scanned_count < SCAN_BATCH_SIZE and scan_symbols:
+            if self.refresh_index >= len(scan_symbols):
+                self.refresh_index = 0
 
-            self.update_watchlist_coin(coin, self.refresh_index)
+            symbol = scan_symbols[self.refresh_index]
 
-        except Exception as e:
-            print(e)
+            try:
+                self.update_watchlist_coin({"symbol": symbol}, self.refresh_index)
+            except Exception as e:
+                print(e)
 
-        self.refresh_index += 1
+            self.refresh_index += 1
+            scanned_count += 1
 
-        if self.refresh_index >= len(self.coins):
-            self.refresh_index = 0
+            if self.refresh_index >= len(scan_symbols):
+                self.refresh_index = 0
+                break
 
-        if self.selected_symbol:
-            self.refresh_selected()
+        if self.scan_mode == SCAN_MODE_TOP50:
+            self.sort_top50_cards_if_needed()
 
-        self.app.after(1000, self.refresh_one_coin)
+        self.mark_scan_finished()
+
+        self.app.after(SCAN_INTERVAL_MS, self.scan_one_coin)
+
+    def mark_scan_finished(self):
+
+        if self.last_scan_label is not None:
+            self.configure_label_if_changed(
+                self.last_scan_label,
+                text=f"Ostatni skan: {current_polish_time()}"
+            )
+
+        self.reset_scan_countdown()
+        self.update_scan_progress()
+
+    def reset_scan_countdown(self):
+
+        self.next_scan_seconds = SCAN_INTERVAL_SECONDS
+
+    def update_scan_progress(self):
+
+        if self.scan_progress_label is None:
+            return
+
+        total = len(self.get_scan_symbols())
+        scanned = len(self.top50_results) if self.scan_mode == SCAN_MODE_TOP50 else self.refresh_index
+
+        if self.scan_mode == SCAN_MODE_WATCHLIST and scanned == 0 and total:
+            scanned = total
+
+        self.configure_label_if_changed(
+            self.scan_progress_label,
+            text=f"Skan: {min(scanned, total)}/{total}"
+        )
+
+    def get_scan_symbols(self):
+
+        # Watchlist scans exactly in the user's saved order.
+        if self.scan_mode == SCAN_MODE_WATCHLIST:
+            return self.watchlist_symbols
+
+        # Top 50 scans the fixed Bybit list, while cards are ranked separately.
+        return self.top50_symbols
 
     def set_scan_mode(self, mode):
 
@@ -157,8 +231,10 @@ class SmartTradeUI:
 
         self.scan_mode = mode
         self.refresh_index = 0
+        self.reset_scan_countdown()
 
         if mode == SCAN_MODE_TOP50:
+            self.top50_results = {}
             self.load_top50_scan_symbols()
         else:
             self.watchlist_symbols = get_watchlist()
@@ -166,6 +242,7 @@ class SmartTradeUI:
 
         self.update_scan_mode_buttons()
         self.build_watchlist_cards()
+        self.update_scan_progress()
 
     def load_top50_scan_symbols(self):
 
@@ -214,15 +291,19 @@ class SmartTradeUI:
         rsi = calculate_rsi(df)
         candles = self.prepare_engine_candles(df)
         divergences = self.find_coin_divergences_from_candles(candles)
-        best_divergence = self.select_best_signal(divergences, len(candles))
+        best_divergence = self.select_freshest_best_signal(divergences, len(candles))
 
-        self.update_watchlist_card(
-            index,
-            symbol,
-            rsi,
-            best_divergence,
-            len(candles)
-        )
+        if self.scan_mode == SCAN_MODE_TOP50:
+            self.top50_results[symbol] = {
+                "symbol": symbol,
+                "rsi": rsi,
+                "divergence": best_divergence,
+                "candle_count": len(candles)
+            }
+            self.update_top50_result_card(symbol)
+            return
+
+        self.update_watchlist_card(index, symbol, rsi, best_divergence, len(candles))
 
     def find_coin_divergences(self, df):
 
@@ -250,15 +331,23 @@ class SmartTradeUI:
     def select_best_divergence(self, divergences, candle_count=None):
 
         if candle_count is not None:
-            return self.select_best_signal(
+            return self.select_freshest_best_signal(
                 divergences,
                 candle_count,
                 visible_only=True
             )
 
-        return self.select_best_signal(divergences)
+        return self.select_freshest_best_signal(divergences)
 
     def select_best_signal(self, divergences, candle_count=None, visible_only=False):
+
+        return self.select_freshest_best_signal(
+            divergences,
+            candle_count,
+            visible_only
+        )
+
+    def select_freshest_best_signal(self, divergences, candle_count=None, visible_only=False):
 
         if not divergences:
             return None
@@ -286,7 +375,7 @@ class SmartTradeUI:
         quality_score = calculate_quality_score(divergence.get("quality"))
         freshness = divergence["price_end"]["index"]
 
-        return self.get_signal_priority(status), quality_score, freshness
+        return self.get_signal_priority(status), freshness, quality_score
 
     def signal_filter_status(self, divergence, candle_count=None):
 
@@ -317,6 +406,29 @@ class SmartTradeUI:
         }
 
         return priorities.get(status, 0)
+
+    def get_signal_sort_key(self, result):
+
+        divergence = result.get("divergence")
+        rsi = result.get("rsi") or 0
+
+        if divergence is None:
+            return 0, -1, 0, rsi
+
+        status = self.signal_filter_status(
+            divergence,
+            result.get("candle_count")
+        )
+        priorities = {
+            "ACTIVE": 5,
+            "AGING": 4,
+            "FILTERED": 3,
+            "EXPIRED": 2
+        }
+        freshness = divergence["price_end"]["index"]
+        quality_score = calculate_quality_score(divergence.get("quality"))
+
+        return priorities.get(status, 0), freshness, quality_score, rsi
 
     def is_visible_signal(self, divergence, candle_count):
 
@@ -358,12 +470,31 @@ class SmartTradeUI:
                 self.format_filtered_signal(divergence, candle_count)
             )
 
-        card["symbol"].configure(text=symbol)
-        card["status"].configure(text=status, text_color=status_color)
-        card["setup"].configure(text=setup_text, text_color=setup_color)
-        card["time"].configure(text=signal_time)
-        card["age"].configure(text=age_text)
-        card["rsi"].configure(text=f"RSI {rsi}")
+        self.configure_label_if_changed(card["symbol"], text=symbol)
+        self.configure_label_if_changed(
+            card["status"],
+            text=status,
+            text_color=status_color
+        )
+        self.configure_label_if_changed(
+            card["setup"],
+            text=setup_text,
+            text_color=setup_color
+        )
+        self.configure_label_if_changed(card["time"], text=signal_time)
+        self.configure_label_if_changed(card["age"], text=age_text)
+        self.configure_label_if_changed(card["rsi"], text=f"RSI {rsi}")
+
+    def configure_label_if_changed(self, widget, **options):
+
+        changed_options = {}
+
+        for option, value in options.items():
+            if widget.cget(option) != value:
+                changed_options[option] = value
+
+        if changed_options:
+            widget.configure(**changed_options)
 
     def format_filtered_signal(self, divergence, candle_count):
 
@@ -535,6 +666,7 @@ class SmartTradeUI:
         self.bind_card_click(frame, symbol)
 
         labels["frame"] = frame
+        labels["symbol_value"] = symbol
 
         return labels
 
@@ -738,6 +870,107 @@ class SmartTradeUI:
             card["frame"].pack(fill="x", padx=8, pady=5)
             self.buttons.append(card)
 
+            if self.scan_mode == SCAN_MODE_TOP50:
+                result = self.top50_results.get(coin["symbol"])
+
+                if result is not None:
+                    self.update_watchlist_card(
+                        index,
+                        result["symbol"],
+                        result["rsi"],
+                        result["divergence"],
+                        result["candle_count"]
+                    )
+
+    def sort_top50_cards(self):
+
+        if self.scan_mode != SCAN_MODE_TOP50:
+            return
+
+        results = []
+
+        for position, symbol in enumerate(self.top50_symbols):
+            result = self.top50_results.get(symbol)
+
+            if result is None:
+                result = {
+                    "symbol": symbol,
+                    "rsi": 0,
+                    "divergence": None,
+                    "candle_count": 0
+                }
+
+            result["position"] = position
+            results.append(result)
+
+        sorted_results = sorted(
+            results,
+            key=lambda result: (
+                self.get_signal_sort_key(result),
+                -result["position"]
+            ),
+            reverse=True
+        )
+
+        self.coins = [{"symbol": result["symbol"]} for result in sorted_results]
+        self.reorder_top50_cards(sorted_results)
+        self.last_top50_sort_at = time.monotonic()
+
+    def sort_top50_cards_if_needed(self):
+
+        elapsed_ms = (time.monotonic() - self.last_top50_sort_at) * 1000
+
+        if elapsed_ms >= TOP50_SORT_INTERVAL_MS:
+            self.sort_top50_cards()
+
+    def update_top50_result_card(self, symbol):
+
+        for index, card in enumerate(self.buttons):
+            if card["symbol_value"] != symbol:
+                continue
+
+            result = self.top50_results[symbol]
+            self.update_watchlist_card(
+                index,
+                result["symbol"],
+                result["rsi"],
+                result["divergence"],
+                result["candle_count"]
+            )
+            return
+
+    def reorder_top50_cards(self, sorted_results):
+
+        cards_by_symbol = {
+            card["symbol_value"]: card
+            for card in self.buttons
+        }
+
+        if any(result["symbol"] not in cards_by_symbol for result in sorted_results):
+            self.build_watchlist_cards()
+            return
+
+        for card in self.buttons:
+            card["frame"].pack_forget()
+
+        self.buttons = []
+
+        for index, result in enumerate(sorted_results):
+            symbol = result["symbol"]
+            card = cards_by_symbol[symbol]
+
+            card["frame"].pack(fill="x", padx=8, pady=5)
+            self.buttons.append(card)
+
+            if symbol in self.top50_results:
+                self.update_watchlist_card(
+                    index,
+                    symbol,
+                    result["rsi"],
+                    result["divergence"],
+                    result["candle_count"]
+                )
+
     def build_scan_mode_controls(self):
 
         container = ctk.CTkFrame(self.watchlist_scroll, fg_color="transparent")
@@ -802,6 +1035,30 @@ class SmartTradeUI:
             text_color=MUTED_TEXT_COLOR
         )
         self.top_time_label.pack(side="left", padx=18)
+
+        self.last_scan_label = ctk.CTkLabel(
+            top_bar,
+            text="Ostatni skan: --:--:--",
+            font=("Arial", 13, "bold"),
+            text_color=MUTED_TEXT_COLOR
+        )
+        self.last_scan_label.pack(side="left", padx=14)
+
+        self.next_scan_label = ctk.CTkLabel(
+            top_bar,
+            text=f"Następny skan za: {self.next_scan_seconds} s",
+            font=("Arial", 13, "bold"),
+            text_color=MUTED_TEXT_COLOR
+        )
+        self.next_scan_label.pack(side="left", padx=14)
+
+        self.scan_progress_label = ctk.CTkLabel(
+            top_bar,
+            text="Skan: 0/0",
+            font=("Arial", 13, "bold"),
+            text_color=MUTED_TEXT_COLOR
+        )
+        self.scan_progress_label.pack(side="left", padx=14)
 
         self.top_timeframe_label = ctk.CTkLabel(
             top_bar,
@@ -905,8 +1162,7 @@ class SmartTradeUI:
     def build_ui(self):
 
         self.app.grid_columnconfigure(0, weight=1)
-        self.app.grid_columnconfigure(1, weight=3)
-        self.app.grid_columnconfigure(2, weight=1)
+        self.app.grid_columnconfigure(1, weight=5)
 
         self.app.grid_rowconfigure(0, weight=1)
 
@@ -928,17 +1184,6 @@ class SmartTradeUI:
 
         self.center.grid_rowconfigure(1, weight=1)
         self.center.grid_columnconfigure(0, weight=1)
-        
-
-        self.right = ctk.CTkFrame(
-            self.app,
-            fg_color=PANEL_COLOR,
-            border_color=BORDER_COLOR,
-            border_width=1,
-            corner_radius=10
-        )
-        self.right.grid(row=0,column=2,sticky="nsew",padx=12,pady=12)
-
         self.watchlist_scroll = ctk.CTkScrollableFrame(
             self.left,
             fg_color=PANEL_COLOR,
@@ -999,29 +1244,39 @@ class SmartTradeUI:
             text_color=TEXT_COLOR
         )
 
-        self.center_label.pack(expand=True)
-
-        ctk.CTkLabel(
-            self.right,
-            text="AI",
-            font=("Arial",18,"bold"),
-            text_color=TEXT_COLOR
-        ).pack(pady=10)
+        self.center_label.pack(fill="x", padx=10, pady=(0, 10))
 
         self.update_polish_time()
-        self.refresh_one_coin()
+        self.update_scan_countdown()
+        self.scan_one_coin()
 
     def update_polish_time(self):
 
         current_time = current_polish_time()
 
         if self.top_time_label is not None:
-            self.top_time_label.configure(text=f"Czas PL: {current_time}")
+            self.configure_label_if_changed(
+                self.top_time_label,
+                text=f"Czas PL: {current_time}"
+            )
 
         if self.bottom_time_label is not None:
-            self.bottom_time_label.configure(text=current_time)
+            self.configure_label_if_changed(self.bottom_time_label, text=current_time)
 
         self.app.after(1000, self.update_polish_time)
+
+    def update_scan_countdown(self):
+
+        if self.next_scan_label is not None:
+            self.configure_label_if_changed(
+                self.next_scan_label,
+                text=f"Następny skan za: {self.next_scan_seconds} s"
+            )
+
+        if self.next_scan_seconds > 0:
+            self.next_scan_seconds -= 1
+
+        self.app.after(1000, self.update_scan_countdown)
 
     def build_timeframe_bar(self):
 
