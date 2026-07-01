@@ -1,3 +1,4 @@
+import json
 from pybit.unified_trading import HTTP
 import pandas as pd
 import time
@@ -83,3 +84,10 @@ def calculate_rsi(df, period=14):
     rs = avg_gain / avg_loss
 
     return round((100 - (100 / (1 + rs))).iloc[-1], 2)
+def get_watchlist():
+
+    with open("data/watchlist.json", "r") as file:
+
+        data = json.load(file)
+
+    return data["coins"]

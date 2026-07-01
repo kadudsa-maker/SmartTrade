@@ -1,5 +1,5 @@
 import customtkinter as ctk
-from market import get_top20, get_klines, calculate_rsi
+from market import get_watchlist, get_klines, calculate_rsi
 
 
 class SmartTradeUI:
@@ -14,13 +14,32 @@ class SmartTradeUI:
         self.app.title("SmartTrade")
 
         self.selected_symbol = None
+        self.selected_interval = "15"
 
-        self.coins = get_top20()
+        self.coins = [{"symbol": coin} for coin in get_watchlist()]
         self.buttons = []
+        self.timeframe_buttons = {}
 
         self.refresh_index = 0
 
         self.build_ui()
+
+    def select_timeframe(self, interval):
+
+        self.selected_interval = interval
+
+        self.update_timeframe_buttons()
+        self.refresh_selected()
+
+    def update_timeframe_buttons(self):
+
+        for interval, button in self.timeframe_buttons.items():
+
+            if interval == self.selected_interval:
+                button.configure(fg_color="#1f6aa5")
+
+            else:
+                button.configure(fg_color="#3a3a3a")
 
     def select_coin(self, symbol):
 
@@ -33,7 +52,10 @@ class SmartTradeUI:
         if self.selected_symbol is None:
             return
 
-        df = get_klines(self.selected_symbol)
+        df = get_klines(
+            self.selected_symbol,
+            interval=self.selected_interval
+        )
 
         rsi = calculate_rsi(df)
 
@@ -49,7 +71,10 @@ class SmartTradeUI:
 
         try:
 
-            df = get_klines(coin["symbol"])
+            df = get_klines(
+                coin["symbol"],
+                interval=self.selected_interval
+            )
 
             rsi = calculate_rsi(df)
 
@@ -66,17 +91,14 @@ class SmartTradeUI:
             )
 
         except Exception as e:
-
             print(e)
 
         self.refresh_index += 1
 
         if self.refresh_index >= len(self.coins):
-
             self.refresh_index = 0
 
         if self.selected_symbol:
-
             self.refresh_selected()
 
         self.app.after(1000, self.refresh_one_coin)
@@ -93,7 +115,11 @@ class SmartTradeUI:
         self.left.grid(row=0,column=0,sticky="nsew",padx=10,pady=10)
 
         self.center = ctk.CTkFrame(self.app)
-        self.center.grid(row=0,column=1,sticky="nsew",padx=10,pady=10)
+        self.center.grid(row=0, column=1, sticky="nsew", padx=10, pady=10)
+
+        self.center.grid_rowconfigure(1, weight=1)
+        self.center.grid_columnconfigure(0, weight=1)
+        
 
         self.right = ctk.CTkFrame(self.app)
         self.right.grid(row=0,column=2,sticky="nsew",padx=10,pady=10)
@@ -120,6 +146,13 @@ class SmartTradeUI:
 
             self.buttons.append(button)
 
+        self.build_timeframe_bar()
+
+        self.status_bar = ctk.CTkFrame(
+            self.center,
+            height=45
+        )
+
         self.center_label = ctk.CTkLabel(
             self.center,
             text="Kliknij coina",
@@ -135,6 +168,36 @@ class SmartTradeUI:
         ).pack(pady=10)
 
         self.refresh_one_coin()
+
+    def build_timeframe_bar(self):
+
+        timeframe_bar = ctk.CTkFrame(self.center)
+        timeframe_bar.pack(fill="x", padx=10, pady=10)
+
+        timeframes = [
+            ("1m", "1"),
+            ("5m", "5"),
+            ("15m", "15"),
+            ("30m", "30"),
+            ("1H", "60"),
+            ("4H", "240"),
+            ("1D", "D")
+        ]
+
+        for label, interval in timeframes:
+
+            button = ctk.CTkButton(
+                timeframe_bar,
+                text=label,
+                width=70,
+                command=lambda value=interval: self.select_timeframe(value)
+            )
+
+            button.pack(side="left", padx=4, pady=6)
+
+            self.timeframe_buttons[interval] = button
+
+        self.update_timeframe_buttons()
 
     def run(self):
 
