@@ -57,6 +57,7 @@ class SmartTradeUI:
             self.selected_symbol,
             interval=self.selected_interval
         )
+        df.attrs["symbol"] = self.selected_symbol
 
         rsi = calculate_rsi(df)
 

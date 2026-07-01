@@ -21,10 +21,7 @@ class SmartTradeChart:
         self.pivot_lows = []
         self.rsi_pivot_highs = []
         self.rsi_pivot_lows = []
-        self.bullish_divergences = []
-        self.bearish_divergences = []
-        self.divergence_lines = []
-        self.rsi_divergence_lines = []
+        self.regular_divergences = []
 
         self.canvas = tk.Canvas(
             self.frame,
@@ -56,7 +53,9 @@ class SmartTradeChart:
         self.rsi_series = self._calculate_rsi(self.candles["close"])
         self.pivot_highs, self.pivot_lows = find_pivots(self.candles)
         self.rsi_pivot_highs, self.rsi_pivot_lows = self._find_rsi_pivots()
-        self.bullish_divergences, self.bearish_divergences = find_regular_divergences(
+        self.regular_divergences = find_regular_divergences(
+            self.candles,
+            self.rsi_series,
             self.pivot_highs,
             self.pivot_lows,
             self.rsi_pivot_highs,
@@ -73,17 +72,6 @@ class SmartTradeChart:
 
         self.rsi_series = rsi_data
         self._update_figure()
-        self._draw()
-
-    def set_divergences(self, divergence_lines):
-
-        self.divergence_lines = divergence_lines
-        self._update_figure()
-        self._draw()
-
-    def set_rsi_divergences(self, divergence_lines):
-
-        self.rsi_divergence_lines = divergence_lines
         self._draw()
 
     def _configure_figure(self):
@@ -119,7 +107,6 @@ class SmartTradeChart:
         self._add_pivot_markers()
         self._add_rsi_pivot_markers()
         self._add_regular_divergence_traces()
-        self._add_divergence_traces()
         self._add_rsi_levels()
 
     def _add_rsi_trace(self):
@@ -135,11 +122,6 @@ class SmartTradeChart:
                 yaxis="y2"
             )
         )
-
-    def _add_divergence_traces(self):
-
-        for divergence in self.divergence_lines:
-            self.figure.add_trace(divergence)
 
     def _add_pivot_markers(self):
 
@@ -193,18 +175,16 @@ class SmartTradeChart:
 
     def _add_regular_divergence_traces(self):
 
-        for divergence in self.bullish_divergences:
-            self._add_divergence_trace_pair(divergence, "#26a69a", "Regular Bullish")
+        for divergence in self.regular_divergences:
+            color, label, name = self._divergence_style(divergence["type"])
+            self._add_divergence_trace_pair(divergence, color, name, label)
 
-        for divergence in self.bearish_divergences:
-            self._add_divergence_trace_pair(divergence, "#ef5350", "Regular Bearish")
+    def _add_divergence_trace_pair(self, divergence, color, name, label):
 
-    def _add_divergence_trace_pair(self, divergence, color, name):
-
-        price_start = divergence["price_line"]["start"]
-        price_end = divergence["price_line"]["end"]
-        rsi_start = divergence["rsi_line"]["start"]
-        rsi_end = divergence["rsi_line"]["end"]
+        price_start = divergence["price_start"]
+        price_end = divergence["price_end"]
+        rsi_start = divergence["rsi_start"]
+        rsi_end = divergence["rsi_end"]
 
         self.figure.add_trace(
             go.Scatter(
@@ -213,8 +193,10 @@ class SmartTradeChart:
                     pd.to_datetime(price_end["time"], unit="s")
                 ],
                 y=[price_start["price"], price_end["price"]],
-                mode="lines",
+                mode="lines+text",
                 line=dict(color=color, width=2),
+                text=["", label],
+                textposition="top center",
                 name=f"{name} Price"
             )
         )
@@ -226,12 +208,21 @@ class SmartTradeChart:
                     pd.to_datetime(rsi_end["time"], unit="s")
                 ],
                 y=[rsi_start["price"], rsi_end["price"]],
-                mode="lines",
+                mode="lines+text",
                 line=dict(color=color, width=2),
+                text=["", label],
+                textposition="top center",
                 name=f"{name} RSI",
                 yaxis="y2"
             )
         )
+
+    def _divergence_style(self, divergence_type):
+
+        if divergence_type == "bullish":
+            return "#26a69a", "Bull Div", "Regular Bullish"
+
+        return "#ef5350", "Bear Div", "Regular Bearish"
 
     def _add_rsi_levels(self):
 
@@ -296,6 +287,7 @@ class SmartTradeChart:
     def _prepare_candles(self, df):
 
         candles = df[["time", "open", "high", "low", "close"]].copy()
+        candles.attrs["symbol"] = df.attrs.get("symbol", "UNKNOWN")
 
         candles["time"] = pd.to_numeric(candles["time"])
         candles["time"] = (candles["time"] / 1000).astype(int)
@@ -392,7 +384,6 @@ class SmartTradeChart:
             rsi_top,
             rsi_bottom
         )
-        self._draw_rsi_divergences(step, padding, rsi_top, rsi_bottom)
         self._draw_crosshair(width, price_top, rsi_bottom, padding)
 
     def _draw_empty_state(self):
@@ -573,26 +564,12 @@ class SmartTradeChart:
 
         first_visible_index = len(self.candles) - len(visible_candles)
 
-        for divergence in self.bullish_divergences:
+        for divergence in self.regular_divergences:
+            color, label, _name = self._divergence_style(divergence["type"])
             self._draw_divergence_pair(
                 divergence,
-                "#26a69a",
-                first_visible_index,
-                len(visible_candles),
-                high,
-                low,
-                step,
-                padding,
-                price_top,
-                price_height,
-                rsi_top,
-                rsi_bottom
-            )
-
-        for divergence in self.bearish_divergences:
-            self._draw_divergence_pair(
-                divergence,
-                "#ef5350",
+                color,
+                label,
                 first_visible_index,
                 len(visible_candles),
                 high,
@@ -609,6 +586,7 @@ class SmartTradeChart:
         self,
         divergence,
         color,
+        label,
         first_visible_index,
         visible_count,
         high,
@@ -621,30 +599,53 @@ class SmartTradeChart:
         rsi_bottom
     ):
 
-        price_start = divergence["price_line"]["start"]
-        price_end = divergence["price_line"]["end"]
-        rsi_start = divergence["rsi_line"]["start"]
-        rsi_end = divergence["rsi_line"]["end"]
+        price_start = divergence["price_start"]
+        price_end = divergence["price_end"]
+        rsi_start = divergence["rsi_start"]
+        rsi_end = divergence["rsi_end"]
 
         if not self._is_line_visible(price_start, price_end, first_visible_index, visible_count):
             return
 
+        price_start_x = self._pivot_x(price_start, first_visible_index, step, padding)
+        price_end_x = self._pivot_x(price_end, first_visible_index, step, padding)
+        price_start_y = self._price_to_y(price_start["price"], high, low, price_top, price_height)
+        price_end_y = self._price_to_y(price_end["price"], high, low, price_top, price_height)
+        rsi_start_x = self._pivot_x(rsi_start, first_visible_index, step, padding)
+        rsi_end_x = self._pivot_x(rsi_end, first_visible_index, step, padding)
+        rsi_start_y = self._rsi_to_y(rsi_start["price"], rsi_top, rsi_bottom)
+        rsi_end_y = self._rsi_to_y(rsi_end["price"], rsi_top, rsi_bottom)
+
         self.canvas.create_line(
-            self._pivot_x(price_start, first_visible_index, step, padding),
-            self._price_to_y(price_start["price"], high, low, price_top, price_height),
-            self._pivot_x(price_end, first_visible_index, step, padding),
-            self._price_to_y(price_end["price"], high, low, price_top, price_height),
+            price_start_x,
+            price_start_y,
+            price_end_x,
+            price_end_y,
             fill=color,
             width=2
         )
+        self.canvas.create_text(
+            price_end_x,
+            price_end_y - 12,
+            text=label,
+            fill=color,
+            font=("Arial", 9, "bold")
+        )
 
         self.canvas.create_line(
-            self._pivot_x(rsi_start, first_visible_index, step, padding),
-            self._rsi_to_y(rsi_start["price"], rsi_top, rsi_bottom),
-            self._pivot_x(rsi_end, first_visible_index, step, padding),
-            self._rsi_to_y(rsi_end["price"], rsi_top, rsi_bottom),
+            rsi_start_x,
+            rsi_start_y,
+            rsi_end_x,
+            rsi_end_y,
             fill=color,
             width=2
+        )
+        self.canvas.create_text(
+            rsi_end_x,
+            rsi_end_y - 12,
+            text=label,
+            fill=color,
+            font=("Arial", 9, "bold")
         )
 
     def _is_line_visible(self, start_pivot, end_pivot, first_visible_index, visible_count):
@@ -659,22 +660,6 @@ class SmartTradeChart:
         visible_index = pivot["index"] - first_visible_index
 
         return padding + (visible_index * step) + (step / 2)
-
-    def _draw_rsi_divergences(self, step, padding, top, bottom):
-
-        for line in self.rsi_divergence_lines:
-            start_index, start_value, end_index, end_value = line
-            start_x = padding + (start_index * step) + (step / 2)
-            end_x = padding + (end_index * step) + (step / 2)
-
-            self.canvas.create_line(
-                start_x,
-                self._rsi_to_y(start_value, top, bottom),
-                end_x,
-                self._rsi_to_y(end_value, top, bottom),
-                fill="#42a5f5",
-                width=2
-            )
 
     def _draw_crosshair(self, width, top, bottom, padding):
 
