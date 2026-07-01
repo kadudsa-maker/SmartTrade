@@ -3,6 +3,7 @@ import tkinter as tk
 import customtkinter as ctk
 import pandas as pd
 import plotly.graph_objects as go
+from pivots import find_pivots
 
 
 class SmartTradeChart:
@@ -15,6 +16,8 @@ class SmartTradeChart:
         self.candles = pd.DataFrame()
         self.rsi_period = 14
         self.rsi_series = pd.Series(dtype=float)
+        self.pivot_highs = []
+        self.pivot_lows = []
         self.divergence_lines = []
         self.rsi_divergence_lines = []
 
@@ -46,6 +49,7 @@ class SmartTradeChart:
 
         self.candles = self._prepare_candles(df)
         self.rsi_series = self._calculate_rsi(self.candles["close"])
+        self.pivot_highs, self.pivot_lows = find_pivots(self.candles)
 
         if self.candles.empty:
             return
@@ -100,6 +104,7 @@ class SmartTradeChart:
         )
 
         self._add_rsi_trace()
+        self._add_pivot_markers()
         self._add_divergence_traces()
         self._add_rsi_levels()
 
@@ -121,6 +126,30 @@ class SmartTradeChart:
 
         for divergence in self.divergence_lines:
             self.figure.add_trace(divergence)
+
+    def _add_pivot_markers(self):
+
+        if self.pivot_highs:
+            self.figure.add_trace(
+                go.Scatter(
+                    x=[pd.to_datetime(pivot["time"], unit="s") for pivot in self.pivot_highs],
+                    y=[pivot["price"] for pivot in self.pivot_highs],
+                    mode="markers",
+                    marker=dict(color="#ef5350", size=7),
+                    name="Pivot High"
+                )
+            )
+
+        if self.pivot_lows:
+            self.figure.add_trace(
+                go.Scatter(
+                    x=[pd.to_datetime(pivot["time"], unit="s") for pivot in self.pivot_lows],
+                    y=[pivot["price"] for pivot in self.pivot_lows],
+                    mode="markers",
+                    marker=dict(color="#26a69a", size=7),
+                    name="Pivot Low"
+                )
+            )
 
     def _add_rsi_levels(self):
 
@@ -235,6 +264,7 @@ class SmartTradeChart:
             )
 
         self._draw_rsi_line(visible_rsi, step, padding, rsi_top, rsi_bottom)
+        self._draw_pivot_markers(visible_candles, high, low, step, padding, price_top, candle_area_height)
         self._draw_rsi_divergences(step, padding, rsi_top, rsi_bottom)
         self._draw_crosshair(width, price_top, rsi_bottom, padding)
 
@@ -319,6 +349,46 @@ class SmartTradeChart:
                 fill="#f6c85f",
                 width=2,
                 smooth=True
+            )
+
+    def _draw_pivot_markers(self, visible_candles, high, low, step, padding, top, chart_height):
+
+        first_visible_index = len(self.candles) - len(visible_candles)
+
+        for pivot in self.pivot_highs:
+            visible_index = pivot["index"] - first_visible_index
+
+            if not 0 <= visible_index < len(visible_candles):
+                continue
+
+            x = padding + (visible_index * step) + (step / 2)
+            y = self._price_to_y(pivot["price"], high, low, top, chart_height) - 8
+
+            self.canvas.create_oval(
+                x - 4,
+                y - 4,
+                x + 4,
+                y + 4,
+                fill="#ef5350",
+                outline="#ef5350"
+            )
+
+        for pivot in self.pivot_lows:
+            visible_index = pivot["index"] - first_visible_index
+
+            if not 0 <= visible_index < len(visible_candles):
+                continue
+
+            x = padding + (visible_index * step) + (step / 2)
+            y = self._price_to_y(pivot["price"], high, low, top, chart_height) + 8
+
+            self.canvas.create_oval(
+                x - 4,
+                y - 4,
+                x + 4,
+                y + 4,
+                fill="#26a69a",
+                outline="#26a69a"
             )
 
     def _draw_rsi_divergences(self, step, padding, top, bottom):
