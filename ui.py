@@ -6,7 +6,8 @@ from config import MIN_VISIBLE_QUALITY, SHOW_EXPIRED_SIGNALS
 from divergence import find_regular_divergences
 from market import (
     calculate_rsi,
-    get_available_usdt_perpetual_symbols,
+    filter_symbols,
+    get_all_bybit_symbols,
     get_klines,
     get_top_bybit_symbols,
     get_watchlist,
@@ -816,7 +817,7 @@ class SmartTradeUI:
         current_symbol = self.coins[index]["symbol"]
 
         try:
-            symbols = get_available_usdt_perpetual_symbols()
+            symbols = get_all_bybit_symbols()
         except Exception as error:
             messagebox.showerror(
                 "SmartTrade",
@@ -876,15 +877,20 @@ class SmartTradeUI:
         scroll.pack(fill="both", expand=True, padx=12, pady=(0, 12))
 
         def render_symbols(*_args):
-            query = search_var.get().strip().upper()
-            filtered_symbols = [
-                symbol
-                for symbol in symbols
-                if query in symbol.upper()
-            ]
+            query = search_var.get().strip()
+            filtered_symbols = filter_symbols(symbols, query)
 
             for child in scroll.winfo_children():
                 child.destroy()
+
+            if not filtered_symbols:
+                ctk.CTkLabel(
+                    scroll,
+                    text="Brak wyników",
+                    font=("Arial", 13, "bold"),
+                    text_color=MUTED_TEXT_COLOR
+                ).pack(fill="x", padx=6, pady=10)
+                return
 
             for symbol in filtered_symbols:
                 button = ctk.CTkButton(

@@ -9,10 +9,16 @@ session = HTTP(testnet=False)
 
 WATCHLIST_PATH = Path("data/watchlist.json")
 TOP_BYBIT_CACHE_TTL = 300
+ALL_BYBIT_SYMBOLS_CACHE_TTL = 600
+SYMBOL_SEARCH_LIMIT = 100
 
 # CACHE
 cache = {}
 top_bybit_cache = {}
+all_bybit_symbols_cache = {
+    "time": 0,
+    "symbols": []
+}
 
 
 def get_top20():
@@ -76,8 +82,65 @@ def get_top20_usdt_perpetual_symbols(limit=20):
 
 def get_available_usdt_perpetual_symbols():
 
-    response = session.get_instruments_info(category="linear")
-    instruments = response["result"]["list"]
+    return get_all_bybit_symbols()
+
+
+def get_all_bybit_symbols():
+
+    age = time.time() - all_bybit_symbols_cache["time"]
+
+    if all_bybit_symbols_cache["symbols"] and age < ALL_BYBIT_SYMBOLS_CACHE_TTL:
+        return all_bybit_symbols_cache["symbols"]
+
+    try:
+        symbols = _fetch_all_bybit_symbols()
+    except Exception as error:
+        print(f"Nie udalo sie pobrac pelnej listy symboli Bybit: {error}")
+        return all_bybit_symbols_cache["symbols"]
+
+    all_bybit_symbols_cache["time"] = time.time()
+    all_bybit_symbols_cache["symbols"] = symbols
+
+    print(f"Pobrano symbole Bybit USDT Perpetual: {len(symbols)}")
+
+    return symbols
+
+
+def filter_symbols(symbols, query, limit=SYMBOL_SEARCH_LIMIT):
+
+    normalized_query = query.strip().upper()
+
+    matching_symbols = [
+        symbol
+        for symbol in symbols
+        if normalized_query in symbol.upper()
+    ]
+
+    return matching_symbols[:limit]
+
+
+def _fetch_all_bybit_symbols():
+
+    instruments = []
+    cursor = None
+
+    while True:
+        params = {
+            "category": "linear",
+            "limit": 1000
+        }
+
+        if cursor:
+            params["cursor"] = cursor
+
+        response = session.get_instruments_info(**params)
+        result = response.get("result", {})
+        instruments.extend(result.get("list", []))
+
+        cursor = result.get("nextPageCursor")
+
+        if not cursor:
+            break
 
     symbols = [
         instrument["symbol"]
@@ -87,7 +150,7 @@ def get_available_usdt_perpetual_symbols():
         and instrument.get("contractType") == "LinearPerpetual"
     ]
 
-    return sorted(symbols)
+    return sorted(set(symbols))
 
 
 def load_default_watchlist():
