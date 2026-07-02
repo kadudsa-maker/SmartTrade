@@ -1,7 +1,8 @@
 import customtkinter as ctk
 import time
-from tkinter import StringVar, messagebox
+from tkinter import BooleanVar, StringVar, messagebox
 
+from alerts import AlertManager
 from chart import SmartTradeChart
 from config import (
     ACTIVE_MAX_CANDLES,
@@ -33,6 +34,11 @@ from signal_quality import calculate_quality_score
 from time_utils import current_polish_time, format_polish_time
 
 
+def clamp_alert_quality(value):
+
+    return max(0, min(100, int(value)))
+
+
 BG_COLOR = "#111315"
 PANEL_COLOR = "#181A1F"
 BORDER_COLOR = "#2A2E36"
@@ -59,6 +65,12 @@ TOP_BYBIT_MODES_BY_LIMIT = {
     100: SCAN_MODE_TOP100,
     200: SCAN_MODE_TOP200
 }
+ALERT_SCAN_RANGES = [
+    (SCAN_MODE_WATCHLIST, "Watchlist"),
+    (SCAN_MODE_TOP50, "Top 50"),
+    (SCAN_MODE_TOP100, "Top 100"),
+    (SCAN_MODE_TOP200, "Top 200")
+]
 
 
 class SmartTradeUI:
@@ -96,12 +108,19 @@ class SmartTradeUI:
         self.watchlist_scroll = None
         self.watchlist_title_label = None
         self.reset_watchlist_button = None
+        self.alert_notification_status_label = None
+        self.alert_sound_status_label = None
 
         self.refresh_index = 0
         self.last_top50_sort_at = 0
         self.scan_cycle_number = 0
         self.last_scan_batch_time = None
         self.last_full_scan_time = None
+        self.alert_manager = AlertManager(
+            default_timeframe=self.selected_interval,
+            default_scan_range=self.get_alert_scan_range()
+        )
+        self.alert_settings_window = None
 
         self.build_ui()
 
@@ -137,6 +156,7 @@ class SmartTradeUI:
     def select_coin(self, symbol):
 
         self.selected_symbol = symbol
+        self.alert_manager.mark_opened_for_symbol(symbol)
 
         self.refresh_selected()
 
@@ -356,6 +376,7 @@ class SmartTradeUI:
         candles = self.prepare_engine_candles(df)
         divergences = self.find_coin_divergences_from_candles(candles)
         best_divergence = self.select_freshest_best_signal(divergences, len(candles))
+        self.process_alert_candidate(symbol, best_divergence, len(candles))
 
         if self.is_top_bybit_mode():
             self.top50_results[symbol] = {
@@ -1140,6 +1161,21 @@ class SmartTradeUI:
         )
         self.chart_refreshed_label.pack(side="left", padx=(0, 14))
 
+        self.alerts_button = ctk.CTkButton(
+            top_bar,
+            text="🔔 Alerts",
+            width=96,
+            height=28,
+            fg_color=PANEL_COLOR,
+            hover_color=BORDER_COLOR,
+            border_color=BORDER_COLOR,
+            border_width=1,
+            text_color=TEXT_COLOR,
+            corner_radius=8,
+            command=self.open_alert_settings
+        )
+        self.alerts_button.pack(side="right", padx=(0, 14))
+
     def update_open_chart_status(self, refreshed_at):
 
         if self.open_chart_label is not None:
@@ -1167,6 +1203,313 @@ class SmartTradeUI:
         }
 
         return labels.get(interval, interval)
+
+    def get_alert_scan_range(self):
+
+        if self.scan_mode == SCAN_MODE_WATCHLIST:
+            return SCAN_MODE_WATCHLIST
+
+        return self.scan_mode
+
+    def process_alert_candidate(self, symbol, divergence, candle_count):
+
+        if divergence is None:
+            return
+
+        status, _status_color = self.signal_status(divergence, candle_count)
+        age_text = self.signal_age_text(divergence, candle_count)
+        quality_score = calculate_quality_score(divergence.get("quality"))
+
+        self.alert_manager.process_signal(
+            symbol,
+            self.selected_interval,
+            self.get_alert_scan_range(),
+            divergence,
+            status,
+            age_text,
+            quality_score=quality_score
+        )
+        self.update_alert_status_labels()
+
+    def process_due_alerts(self):
+
+        self.alert_manager.process_due_alerts()
+        self.update_alert_status_labels()
+        self.app.after(1000, self.process_due_alerts)
+
+    def open_alert_settings(self):
+
+        if self.alert_settings_window is not None and self.alert_settings_window.winfo_exists():
+            self.alert_settings_window.focus()
+            return
+
+        settings = self.alert_manager.settings
+
+        if not self.alert_manager.has_saved_settings:
+            settings.scan_range = self.get_alert_scan_range()
+
+        window = ctk.CTkToplevel(self.app)
+        window.title("Alerts")
+        window.geometry("460x720")
+        window.minsize(420, 560)
+        window.configure(fg_color=BG_COLOR)
+        window.transient(self.app)
+        window.grab_set()
+        self.alert_settings_window = window
+
+        window.grid_columnconfigure(0, weight=1)
+        window.grid_rowconfigure(1, weight=1)
+
+        ctk.CTkLabel(
+            window,
+            text="Alerts",
+            font=("Arial", 18, "bold"),
+            text_color=TEXT_COLOR
+        ).grid(row=0, column=0, sticky="ew", padx=16, pady=(14, 8))
+
+        content = ctk.CTkScrollableFrame(
+            window,
+            fg_color=PANEL_COLOR,
+            scrollbar_button_color=BORDER_COLOR,
+            scrollbar_button_hover_color=GRAY
+        )
+        content.grid(row=1, column=0, sticky="nsew", padx=14, pady=(0, 10))
+        content.grid_columnconfigure(0, weight=1)
+
+        alerts_enabled_var = BooleanVar(value=settings.alerts_enabled)
+        sound_enabled_var = BooleanVar(value=settings.sound_enabled)
+        notification_enabled_var = BooleanVar(value=settings.windows_notification_enabled)
+        minimum_quality_var = StringVar(value=str(settings.minimum_quality))
+        scan_range_var = StringVar(value=settings.scan_range or self.get_alert_scan_range())
+        type_vars = {
+            "bullish": BooleanVar(value=settings.bullish),
+            "bearish": BooleanVar(value=settings.bearish)
+        }
+        status_vars = {
+            "active": BooleanVar(value=settings.active),
+            "aging": BooleanVar(value=settings.aging),
+            "expired": BooleanVar(value=settings.expired)
+        }
+
+        self.create_alert_checkbox(content, "Enable Alerts", alerts_enabled_var)
+        self.create_alert_section_label(content, "Minimum Quality")
+
+        quality_entry = ctk.CTkEntry(
+            content,
+            textvariable=minimum_quality_var,
+            fg_color=PANEL_COLOR,
+            border_color=BORDER_COLOR,
+            border_width=1,
+            text_color=TEXT_COLOR
+        )
+        quality_entry.pack(fill="x", padx=14, pady=(0, 10))
+
+        self.create_alert_section_label(content, "Scan Range")
+
+        for value, label in ALERT_SCAN_RANGES:
+            ctk.CTkRadioButton(
+                content,
+                text=label,
+                variable=scan_range_var,
+                value=value,
+                fg_color=BLUE,
+                border_color=BORDER_COLOR,
+                hover_color=BORDER_COLOR,
+                text_color=TEXT_COLOR
+            ).pack(anchor="w", padx=14, pady=2)
+
+        self.create_alert_section_label(content, "Signal Type")
+        self.create_alert_checkbox(content, "Bullish", type_vars["bullish"])
+        self.create_alert_checkbox(content, "Bearish", type_vars["bearish"])
+
+        self.create_alert_section_label(content, "Status")
+        self.create_alert_checkbox(content, "ACTIVE", status_vars["active"])
+        self.create_alert_checkbox(content, "AGING", status_vars["aging"])
+        self.create_alert_checkbox(content, "EXPIRED", status_vars["expired"])
+
+        self.create_alert_section_label(content, "Sound")
+        self.create_alert_checkbox(content, "Enable Sound", sound_enabled_var)
+
+        self.create_alert_section_label(content, "Windows Notification")
+        self.create_alert_checkbox(
+            content,
+            "Enable Windows Notification",
+            notification_enabled_var
+        )
+
+        self.create_alert_section_label(content, "Notification status")
+        self.alert_notification_status_label = self.create_card_label(
+            content,
+            "",
+            12,
+            MUTED_TEXT_COLOR,
+            True
+        )
+        self.alert_notification_status_label.pack(anchor="w", padx=14, pady=2)
+        self.alert_sound_status_label = self.create_card_label(
+            content,
+            "",
+            12,
+            MUTED_TEXT_COLOR,
+            True
+        )
+        self.alert_sound_status_label.pack(anchor="w", padx=14, pady=(2, 10))
+        self.update_alert_status_labels()
+
+        def save_alert_settings():
+            try:
+                minimum_quality = clamp_alert_quality(minimum_quality_var.get())
+            except (TypeError, ValueError):
+                messagebox.showerror(
+                    "SmartTrade",
+                    "Minimum Quality musi być liczbą od 0 do 100."
+                )
+                return
+
+            self.alert_manager.update_settings(
+                alerts_enabled=alerts_enabled_var.get(),
+                minimum_quality=minimum_quality,
+                scan_range=scan_range_var.get(),
+                bullish=type_vars["bullish"].get(),
+                bearish=type_vars["bearish"].get(),
+                active=status_vars["active"].get(),
+                aging=status_vars["aging"].get(),
+                expired=status_vars["expired"].get(),
+                sound_enabled=sound_enabled_var.get(),
+                windows_notification_enabled=notification_enabled_var.get()
+            )
+            window.destroy()
+
+        button_bar = ctk.CTkFrame(window, fg_color=BG_COLOR)
+        button_bar.grid(row=2, column=0, sticky="ew", padx=14, pady=(0, 14))
+        button_bar.grid_columnconfigure(0, weight=1)
+        button_bar.grid_columnconfigure(1, weight=1)
+        button_bar.grid_columnconfigure(2, weight=1)
+        button_bar.grid_columnconfigure(3, weight=1)
+
+        ctk.CTkButton(
+            button_bar,
+            text="Anuluj",
+            height=36,
+            fg_color=PANEL_COLOR,
+            hover_color=BORDER_COLOR,
+            border_color=BORDER_COLOR,
+            border_width=1,
+            text_color=TEXT_COLOR,
+            corner_radius=8,
+            command=window.destroy
+        ).grid(row=0, column=0, sticky="ew", padx=(0, 5))
+
+        ctk.CTkButton(
+            button_bar,
+            text="Test Alert",
+            height=36,
+            fg_color=PANEL_COLOR,
+            hover_color=BORDER_COLOR,
+            border_color=BORDER_COLOR,
+            border_width=1,
+            text_color=TEXT_COLOR,
+            corner_radius=8,
+            command=self.run_test_alert
+        ).grid(row=0, column=1, sticky="ew", padx=5)
+
+        ctk.CTkButton(
+            button_bar,
+            text="Force Test",
+            height=36,
+            fg_color=PANEL_COLOR,
+            hover_color=BORDER_COLOR,
+            border_color=BORDER_COLOR,
+            border_width=1,
+            text_color=TEXT_COLOR,
+            corner_radius=8,
+            command=self.run_force_test_alert
+        ).grid(row=0, column=2, sticky="ew", padx=5)
+
+        ctk.CTkButton(
+            button_bar,
+            text="Zapisz",
+            height=36,
+            fg_color=BLUE,
+            hover_color="#2D83C4",
+            text_color="#FFFFFF",
+            corner_radius=8,
+            command=save_alert_settings
+        ).grid(row=0, column=3, sticky="ew", padx=(5, 0))
+
+    def run_test_alert(self):
+
+        self.alert_manager.send_test_alert()
+        self.update_alert_status_labels()
+
+    def run_force_test_alert(self):
+
+        self.alert_manager.send_force_test_alert(self.selected_interval)
+        self.update_alert_status_labels()
+
+    def update_alert_status_labels(self):
+
+        if (
+            self.alert_notification_status_label is None
+            or self.alert_sound_status_label is None
+        ):
+            return
+
+        status = self.alert_manager.notifier.diagnostic_status()
+
+        if status["notification_ok"]:
+            notification_text = "🟢 Windows Notification: OK"
+            notification_color = GREEN
+        else:
+            notification_text = "🔴 Windows Notification: FAILED"
+            notification_color = RED
+
+        if status["sound_ok"]:
+            sound_text = "🟢 Sound: OK"
+            sound_color = GREEN
+        else:
+            sound_text = "🔴 Sound: FAILED"
+            sound_color = RED
+
+        self.configure_label_if_changed(
+            self.alert_notification_status_label,
+            text=notification_text,
+            text_color=notification_color
+        )
+        self.configure_label_if_changed(
+            self.alert_sound_status_label,
+            text=sound_text,
+            text_color=sound_color
+        )
+
+    def create_alert_section_label(self, parent, text):
+
+        ctk.CTkLabel(
+            parent,
+            text=text,
+            font=("Arial", 11, "bold"),
+            text_color=MUTED_TEXT_COLOR
+        ).pack(anchor="w", padx=14, pady=(8, 4))
+
+    def create_alert_checkbox(self, parent, text, variable, compact=False, packed=True):
+
+        checkbox = ctk.CTkCheckBox(
+            parent,
+            text=text,
+            variable=variable,
+            fg_color=BLUE,
+            border_color=BORDER_COLOR,
+            hover_color=BORDER_COLOR,
+            text_color=TEXT_COLOR
+        )
+
+        if packed:
+            if compact:
+                checkbox.pack(side="left", padx=(0, 10), pady=2)
+            else:
+                checkbox.pack(anchor="w", padx=14, pady=2)
+
+        return checkbox
 
     def build_ui(self):
 
@@ -1239,6 +1582,7 @@ class SmartTradeUI:
         self.chart.pack(fill="both", expand=True, padx=10, pady=(0, 10))
 
         self.update_polish_time()
+        self.process_due_alerts()
         self.scan_one_coin()
 
     def update_polish_time(self):

@@ -1,0 +1,12 @@
+{
+  "alerts_enabled": true,
+  "minimum_quality": 60,
+  "scan_range": "top100",
+  "bullish": true,
+  "bearish": true,
+  "active": true,
+  "aging": true,
+  "expired": false,
+  "sound_enabled": true,
+  "windows_notification_enabled": true
+}

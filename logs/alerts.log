@@ -1,0 +1,141 @@
+[2026-07-02 22:58:23]
+
+FORCE TEST
+
+Sound: OK
+
+Notification: FAILED
+
+Backend: none
+
+Reason: plyer: No module named 'plyer'; win10toast: No module named 'win10toast'
+
+----------------------------------------
+[2026-07-02 23:03:34]
+
+FORCE TEST
+
+Sound: OK
+
+Notification: OK
+
+Backend: plyer
+
+Reason: 
+
+----------------------------------------
+[2026-07-02 23:03:57]
+
+FORCE TEST
+
+Sound: OK
+
+Notification: OK
+
+Backend: plyer
+
+Reason: 
+
+----------------------------------------
+[2026-07-02 23:04:19]
+
+ALERT
+
+SOLUSDT
+
+Bearish
+
+Quality: 42
+
+TF: 1m
+
+Status: AGING
+
+Notification: OK
+
+----------------------------------------
+[2026-07-02 23:04:34]
+
+ALERT
+
+SPCXUSDT
+
+Bullish
+
+Quality: 52
+
+TF: 1m
+
+Status: AGING
+
+Notification: OK
+
+----------------------------------------
+[2026-07-02 23:06:46]
+
+ALERT
+
+PUMPFUNUSDT
+
+Bearish
+
+Quality: 52
+
+TF: 15m
+
+Status: AGING
+
+Notification: OK
+
+----------------------------------------
+[2026-07-02 23:07:01]
+
+ALERT
+
+INTCUSDT
+
+Bullish
+
+Quality: 45
+
+TF: 15m
+
+Status: AGING
+
+Notification: OK
+
+----------------------------------------
+[2026-07-02 23:07:09]
+
+ALERT
+
+JTOUSDT
+
+Bullish
+
+Quality: 54
+
+TF: 15m
+
+Status: AGING
+
+Notification: OK
+
+----------------------------------------
+[2026-07-02 23:07:13]
+
+ALERT
+
+AIGENSYNUSDT
+
+Bearish
+
+Quality: 38
+
+TF: 15m
+
+Status: ACTIVE
+
+Notification: OK
+
+----------------------------------------
