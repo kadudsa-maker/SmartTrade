@@ -82,6 +82,8 @@ class SmartTradeUI:
         self.top_limit_container = None
         self.top_time_label = None
         self.top_timeframe_label = None
+        self.open_chart_label = None
+        self.chart_refreshed_label = None
         self.last_scan_label = None
         self.next_scan_label = None
         self.scan_progress_label = None
@@ -148,6 +150,7 @@ class SmartTradeUI:
         price = round(df["close"].iloc[-1], 2)
 
         self.chart.set_candles(df)
+        self.update_open_chart_status(current_polish_time())
 
     def refresh_one_coin(self):
 
@@ -1153,9 +1156,10 @@ class SmartTradeUI:
             border_color=BORDER_COLOR,
             border_width=1,
             corner_radius=10,
-            height=54
+            height=44
         )
         top_bar.pack(fill="x", padx=10, pady=(0, 10))
+        top_bar.pack_propagate(False)
 
         self.top_time_label = ctk.CTkLabel(
             top_bar,
@@ -1163,15 +1167,51 @@ class SmartTradeUI:
             font=("Arial", 13, "bold"),
             text_color=MUTED_TEXT_COLOR
         )
-        self.top_time_label.pack(side="left", padx=14)
+        self.top_time_label.pack(side="left", padx=(14, 10))
 
-        self.top_timeframe_label = ctk.CTkLabel(
+        ctk.CTkLabel(
             top_bar,
-            text=f"TimeFrame: {self.interval_label(self.selected_interval)}",
+            text="|",
             font=("Arial", 13, "bold"),
-            text_color=BLUE
+            text_color=GRAY
+        ).pack(side="left", padx=(0, 10))
+
+        self.open_chart_label = ctk.CTkLabel(
+            top_bar,
+            text="Otwarty: —",
+            font=("Arial", 13, "bold"),
+            text_color=TEXT_COLOR
         )
-        self.top_timeframe_label.pack(side="right", padx=14)
+        self.open_chart_label.pack(side="left", padx=(0, 10))
+
+        ctk.CTkLabel(
+            top_bar,
+            text="|",
+            font=("Arial", 13, "bold"),
+            text_color=GRAY
+        ).pack(side="left", padx=(0, 10))
+
+        self.chart_refreshed_label = ctk.CTkLabel(
+            top_bar,
+            text="Wykres odświeżony: —",
+            font=("Arial", 13, "bold"),
+            text_color=MUTED_TEXT_COLOR
+        )
+        self.chart_refreshed_label.pack(side="left", padx=(0, 14))
+
+    def update_open_chart_status(self, refreshed_at):
+
+        if self.open_chart_label is not None:
+            self.configure_label_if_changed(
+                self.open_chart_label,
+                text=f"Otwarty: {self.selected_symbol or '—'}"
+            )
+
+        if self.chart_refreshed_label is not None:
+            self.configure_label_if_changed(
+                self.chart_refreshed_label,
+                text=f"Wykres odświeżony: {refreshed_at}"
+            )
 
     def interval_label(self, interval):
 
