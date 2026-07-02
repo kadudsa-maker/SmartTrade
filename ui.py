@@ -3,6 +3,7 @@ import time
 from tkinter import StringVar, messagebox
 from chart import SmartTradeChart
 from config import MIN_VISIBLE_QUALITY, SHOW_EXPIRED_SIGNALS
+from config import PIVOT_LEFT, PIVOT_RIGHT
 from divergence import find_regular_divergences
 from market import (
     calculate_rsi,
@@ -31,8 +32,8 @@ YELLOW = "#F1C40F"
 BLUE = "#3498DB"
 GRAY = "#6E7681"
 
-ACTIVE_MAX_AGE = 3
-AGING_MAX_AGE = 10
+ACTIVE_MAX_AGE = 5
+AGING_MAX_AGE = 12
 SCAN_INTERVAL_SECONDS = 1
 SCAN_BATCH_SIZE = 3
 SCAN_INTERVAL_MS = 1000
@@ -424,10 +425,16 @@ class SmartTradeUI:
     def find_coin_divergences_from_candles(self, candles):
 
         rsi_series = self.calculate_rsi_series(candles["close"])
-        price_pivot_highs, price_pivot_lows = find_pivots(candles)
+        price_pivot_highs, price_pivot_lows = find_pivots(
+            candles,
+            left=PIVOT_LEFT,
+            right=PIVOT_RIGHT
+        )
         rsi_pivot_highs, rsi_pivot_lows = find_rsi_pivots(
             rsi_series,
-            candles["time"]
+            candles["time"],
+            left=PIVOT_LEFT,
+            right=PIVOT_RIGHT
         )
 
         return find_regular_divergences(
@@ -484,7 +491,7 @@ class SmartTradeUI:
 
         status = self.signal_filter_status(divergence, candle_count)
         quality_score = calculate_quality_score(divergence.get("quality"))
-        freshness = divergence["price_end"]["index"]
+        freshness = divergence.get("confirmed_index", divergence["price_end"]["index"])
 
         return self.get_signal_priority(status), freshness, quality_score
 
@@ -536,7 +543,7 @@ class SmartTradeUI:
             "FILTERED": 3,
             "EXPIRED": 2
         }
-        freshness = divergence["price_end"]["index"]
+        freshness = divergence.get("confirmed_index", divergence["price_end"]["index"])
         quality_score = calculate_quality_score(divergence.get("quality"))
 
         return priorities.get(status, 0), freshness, quality_score, rsi
@@ -659,7 +666,9 @@ class SmartTradeUI:
             return f"{symbol}\n—\nRSI {rsi}"
 
         quality_score = calculate_quality_score(divergence.get("quality"))
-        signal_time = format_polish_time(divergence["price_end"]["time"])
+        signal_time = format_polish_time(
+            divergence.get("confirmed_time", divergence["price_end"]["time"])
+        )
 
         if divergence["type"] == "bullish":
             return f"{symbol}\n🟢 Bull Q:{quality_score}\n{signal_time} PL\nRSI {rsi}"
@@ -698,7 +707,7 @@ class SmartTradeUI:
         if divergence is None:
             return ""
 
-        return f"{format_polish_time(divergence['price_end']['time'])} PL"
+        return f"{format_polish_time(divergence.get('confirmed_time', divergence['price_end']['time']))} PL"
 
     def signal_age_text(self, divergence, candle_count):
 
@@ -717,7 +726,10 @@ class SmartTradeUI:
 
     def signal_age(self, divergence, candle_count):
 
-        return max(0, candle_count - 1 - divergence["price_end"]["index"])
+        if divergence.get("age_candles") is not None:
+            return divergence["age_candles"]
+
+        return max(0, candle_count - 1 - divergence.get("confirmed_index", divergence["price_end"]["index"]))
 
     def prepare_engine_candles(self, df):
 

@@ -1,3 +1,4 @@
+from config import PIVOT_RIGHT
 from signal_quality import calculate_quality_score, calculate_signal_quality
 
 
@@ -65,6 +66,7 @@ def _find_regular_bullish(df, rsi, price_lows, rsi_lows):
                 rsi_start,
                 rsi_end
             )
+            enrich_divergence_confirmation(divergence, len(df), _candle_times(df))
             divergence["quality"] = calculate_signal_quality(df, divergence, "low")
             divergences.append(divergence)
             _log_divergence(df, rsi, divergence)
@@ -101,6 +103,7 @@ def _find_regular_bearish(df, rsi, price_highs, rsi_highs):
                 rsi_start,
                 rsi_end
             )
+            enrich_divergence_confirmation(divergence, len(df), _candle_times(df))
             divergence["quality"] = calculate_signal_quality(df, divergence, "high")
             divergences.append(divergence)
             _log_divergence(df, rsi, divergence)
@@ -156,16 +159,56 @@ def _is_rsi_pair_aligned(rsi_start, rsi_end, first_price_index, second_price_ind
 
 def _build_divergence(kind, price_start, price_end, rsi_start, rsi_end):
 
+    pivot_index = price_end["index"]
+    confirmed_index = pivot_index + PIVOT_RIGHT
+
     return {
         "type": kind,
         "price_start": price_start,
         "price_end": price_end,
         "rsi_start": rsi_start,
         "rsi_end": rsi_end,
+        "pivot_index": pivot_index,
+        "confirmed_index": confirmed_index,
+        "pivot_time": price_end["time"],
+        "confirmed_time": None,
+        "age_candles": None,
         "quality": None,
         # Deprecated: kept temporarily for compatibility with earlier code.
         "strength": 0
     }
+
+
+def enrich_divergence_confirmation(divergence, candle_count, times=None, right=PIVOT_RIGHT):
+
+    # Pivot powstaje historycznie, ale sygnał jest znany dopiero po right świecach.
+    pivot_index = divergence.get("pivot_index", divergence["price_end"]["index"])
+    confirmed_index = pivot_index + right
+    last_closed_index = candle_count - 1
+
+    divergence["pivot_index"] = pivot_index
+    divergence["confirmed_index"] = confirmed_index
+    divergence["pivot_time"] = divergence["price_end"]["time"]
+    divergence["confirmed_time"] = _confirmed_time(divergence, confirmed_index, times)
+    divergence["age_candles"] = max(0, last_closed_index - confirmed_index)
+
+    return divergence
+
+
+def _confirmed_time(divergence, confirmed_index, times):
+
+    if times is None or confirmed_index < 0 or confirmed_index >= len(times):
+        return divergence["price_end"]["time"]
+
+    return times.iloc[confirmed_index] if hasattr(times, "iloc") else times[confirmed_index]
+
+
+def _candle_times(df):
+
+    if df is None or "time" not in df.columns:
+        return None
+
+    return df["time"]
 
 
 def _log_divergence(df, rsi, divergence):

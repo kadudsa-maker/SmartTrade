@@ -1,6 +1,7 @@
 import pandas as pd
 
-from divergence import find_regular_divergences
+from config import PIVOT_RIGHT
+from divergence import enrich_divergence_confirmation, find_regular_divergences
 
 
 def _pivot(index, price):
@@ -74,3 +75,23 @@ def test_no_divergence_when_price_pivots_are_too_far_apart():
     )
 
     assert divergences == []
+
+
+def test_divergence_age_is_counted_from_confirmation_index():
+
+    divergence = {
+        "price_end": {"index": 50, "time": 50, "price": 100}
+    }
+
+    enrich_divergence_confirmation(
+        divergence,
+        candle_count=56,
+        times=pd.Series(range(56)),
+        right=PIVOT_RIGHT
+    )
+
+    assert divergence["pivot_index"] == 50
+    assert divergence["confirmed_index"] == 52
+    assert divergence["pivot_time"] == 50
+    assert divergence["confirmed_time"] == 52
+    assert divergence["age_candles"] == 3

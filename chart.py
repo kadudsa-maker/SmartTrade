@@ -3,6 +3,7 @@ import tkinter as tk
 import customtkinter as ctk
 import pandas as pd
 import plotly.graph_objects as go
+from config import PIVOT_LEFT, PIVOT_RIGHT
 from divergence import find_regular_divergences
 from pivots import find_pivots, find_rsi_pivots
 from rsi import calculate_rsi_series
@@ -20,8 +21,8 @@ RED = "#E74C3C"
 YELLOW = "#F1C40F"
 GRAY = "#6E7681"
 
-ACTIVE_MAX_AGE = 3
-AGING_MAX_AGE = 10
+ACTIVE_MAX_AGE = 5
+AGING_MAX_AGE = 12
 
 
 class SmartTradeChart:
@@ -74,10 +75,16 @@ class SmartTradeChart:
 
         self.candles = self._prepare_candles(df)
         self.rsi_series = self._calculate_rsi(self.candles["close"])
-        self.pivot_highs, self.pivot_lows = find_pivots(self.candles)
+        self.pivot_highs, self.pivot_lows = find_pivots(
+            self.candles,
+            left=PIVOT_LEFT,
+            right=PIVOT_RIGHT
+        )
         self.rsi_pivot_highs, self.rsi_pivot_lows = find_rsi_pivots(
             self.rsi_series,
-            self.candles["time"]
+            self.candles["time"],
+            left=PIVOT_LEFT,
+            right=PIVOT_RIGHT
         )
         self.regular_divergences = find_regular_divergences(
             self.candles,
@@ -269,7 +276,9 @@ class SmartTradeChart:
     def _divergence_label_with_quality(self, label, divergence):
 
         quality_score = self._quality_score(divergence)
-        signal_time = format_polish_time(divergence["price_end"]["time"])
+        signal_time = format_polish_time(
+            divergence.get("confirmed_time", divergence["price_end"]["time"])
+        )
         status = self._signal_status(divergence)
 
         return f"{label}\n{status}\nQ: {quality_score}\n{signal_time} PL"
@@ -292,7 +301,10 @@ class SmartTradeChart:
 
     def _signal_age(self, divergence):
 
-        return max(0, len(self.candles) - 1 - divergence["price_end"]["index"])
+        if divergence.get("age_candles") is not None:
+            return divergence["age_candles"]
+
+        return max(0, len(self.candles) - 1 - divergence.get("confirmed_index", divergence["price_end"]["index"]))
 
     def _mid_time(self, start, end):
 

@@ -1,4 +1,7 @@
-def find_pivots(df, left=3, right=3):
+from config import PIVOT_LEFT, PIVOT_RIGHT
+
+
+def find_pivots(df, left=PIVOT_LEFT, right=PIVOT_RIGHT):
 
     pivot_highs = []
     pivot_lows = []
@@ -40,7 +43,7 @@ def find_pivots(df, left=3, right=3):
     return pivot_highs, pivot_lows
 
 
-def find_rsi_pivots(rsi, times, left=3, right=3):
+def find_rsi_pivots(rsi, times, left=PIVOT_LEFT, right=PIVOT_RIGHT):
 
     rsi_df = _build_rsi_pivot_frame(rsi, times)
 

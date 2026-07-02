@@ -1,4 +1,4 @@
-from config import DISTANCE_PROFILE
+from config import DISTANCE_PROFILE, PIVOT_LEFT, PIVOT_RIGHT
 
 
 IDEAL_MIN_DISTANCE = 20
@@ -6,7 +6,7 @@ IDEAL_MAX_DISTANCE = 45
 MAX_DISTANCE = 60
 
 
-def calculate_pivot_strength(df, pivot, pivot_type, left=3, right=3):
+def calculate_pivot_strength(df, pivot, pivot_type, left=PIVOT_LEFT, right=PIVOT_RIGHT):
 
     if df is None or df.empty:
         return 0

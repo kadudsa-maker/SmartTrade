@@ -64,14 +64,14 @@ def test_calculate_quality_score_uses_weighted_volume_model():
 def test_calculate_distance_score_uses_timeframe_profiles():
 
     profiles = {
-        "1": (25, 45),
-        "3": (22, 42),
-        "5": (20, 40),
-        "15": (16, 32),
-        "30": (14, 28),
-        "60": (12, 24),
-        "240": (10, 20),
-        "D": (8, 16)
+        "1": (12, 24),
+        "3": (11, 23),
+        "5": (10, 22),
+        "15": (8, 18),
+        "30": (7, 16),
+        "60": (6, 14),
+        "240": (5, 12),
+        "D": (4, 10)
     }
 
     for timeframe, (ideal_min, ideal_max) in profiles.items():
