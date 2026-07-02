@@ -11,11 +11,7 @@ TOP_BYBIT_CACHE_TTL = 300
 
 # CACHE
 cache = {}
-top_bybit_cache = {
-    "time": 0,
-    "limit": None,
-    "symbols": []
-}
+top_bybit_cache = {}
 
 
 def get_top20():
@@ -33,14 +29,14 @@ def get_top20():
 
 def get_top_bybit_symbols(limit=50):
 
-    age = time.time() - top_bybit_cache["time"]
+    cached = top_bybit_cache.get(limit)
 
     if (
-        top_bybit_cache["symbols"]
-        and top_bybit_cache["limit"] == limit
-        and age < TOP_BYBIT_CACHE_TTL
+        cached
+        and cached["symbols"]
+        and time.time() - cached["time"] < TOP_BYBIT_CACHE_TTL
     ):
-        return top_bybit_cache["symbols"]
+        return cached["symbols"]
 
     try:
         response = session.get_tickers(category="linear")
@@ -64,9 +60,10 @@ def get_top_bybit_symbols(limit=50):
         print(f"Nie udało się pobrać Top {limit} Bybit: {error}")
         return []
 
-    top_bybit_cache["time"] = time.time()
-    top_bybit_cache["limit"] = limit
-    top_bybit_cache["symbols"] = symbols
+    top_bybit_cache[limit] = {
+        "time": time.time(),
+        "symbols": symbols
+    }
 
     return symbols
 

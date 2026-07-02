@@ -34,9 +34,22 @@ AGING_MAX_AGE = 10
 SCAN_INTERVAL_SECONDS = 1
 SCAN_BATCH_SIZE = 3
 SCAN_INTERVAL_MS = 1000
-TOP50_SORT_INTERVAL_MS = 5000
+TOP_SORT_INTERVAL_MS = 10000
 SCAN_MODE_WATCHLIST = "watchlist"
+SCAN_MODE_TOP_BYBIT = "top_bybit"
 SCAN_MODE_TOP50 = "top50"
+SCAN_MODE_TOP100 = "top100"
+SCAN_MODE_TOP200 = "top200"
+TOP_BYBIT_LIMITS = {
+    SCAN_MODE_TOP50: 50,
+    SCAN_MODE_TOP100: 100,
+    SCAN_MODE_TOP200: 200
+}
+TOP_BYBIT_MODES_BY_LIMIT = {
+    50: SCAN_MODE_TOP50,
+    100: SCAN_MODE_TOP100,
+    200: SCAN_MODE_TOP200
+}
 
 
 class SmartTradeUI:
@@ -54,14 +67,19 @@ class SmartTradeUI:
         self.selected_symbol = None
         self.selected_interval = "15"
         self.scan_mode = SCAN_MODE_WATCHLIST
+        self.top_bybit_limit = 50
 
         self.watchlist_symbols = get_watchlist()
         self.top50_symbols = []
         self.top50_results = {}
         self.coins = [{"symbol": coin} for coin in self.watchlist_symbols]
         self.buttons = []
+        self.cards_by_symbol = {}
+        self.last_card_texts = {}
         self.timeframe_buttons = {}
         self.scan_mode_buttons = {}
+        self.top_limit_buttons = {}
+        self.top_limit_container = None
         self.top_time_label = None
         self.top_timeframe_label = None
         self.last_scan_label = None
@@ -82,9 +100,10 @@ class SmartTradeUI:
         self.selected_interval = interval
         self.refresh_index = 0
         self.top50_results = {}
+        self.last_top50_sort_at = time.monotonic()
         self.reset_scan_countdown()
 
-        if self.scan_mode == SCAN_MODE_TOP50:
+        if self.is_top_bybit_mode():
             self.coins = [{"symbol": symbol} for symbol in self.top50_symbols]
             self.build_watchlist_cards()
 
@@ -143,9 +162,11 @@ class SmartTradeUI:
             self.app.after(SCAN_INTERVAL_MS, self.scan_one_coin)
             return
 
+        batch_started_at = time.perf_counter()
         scanned_count = 0
+        batch_size = self.get_scan_batch_size()
 
-        while scanned_count < SCAN_BATCH_SIZE and scan_symbols:
+        while scanned_count < batch_size and scan_symbols:
             if self.refresh_index >= len(scan_symbols):
                 self.refresh_index = 0
 
@@ -163,8 +184,14 @@ class SmartTradeUI:
                 self.refresh_index = 0
                 break
 
-        if self.scan_mode == SCAN_MODE_TOP50:
+        if self.is_top_bybit_mode():
             self.sort_top50_cards_if_needed()
+
+        batch_duration_ms = (time.perf_counter() - batch_started_at) * 1000
+        print(
+            f"Scan batch: mode={self.scan_mode}, "
+            f"coins={scanned_count}, duration={batch_duration_ms:.0f}ms"
+        )
 
         self.mark_scan_finished()
 
@@ -191,7 +218,7 @@ class SmartTradeUI:
             return
 
         total = len(self.get_scan_symbols())
-        scanned = len(self.top50_results) if self.scan_mode == SCAN_MODE_TOP50 else self.refresh_index
+        scanned = len(self.top50_results) if self.is_top_bybit_mode() else self.refresh_index
 
         if self.scan_mode == SCAN_MODE_WATCHLIST and scanned == 0 and total:
             scanned = total
@@ -207,10 +234,29 @@ class SmartTradeUI:
         if self.scan_mode == SCAN_MODE_WATCHLIST:
             return self.watchlist_symbols
 
-        # Top 50 scans the fixed Bybit list, while cards are ranked separately.
+        # Top Bybit scans the fixed Bybit list, while cards are ranked separately.
         return self.top50_symbols
 
+    def get_scan_batch_size(self):
+
+        if not self.is_top_bybit_mode():
+            return SCAN_BATCH_SIZE
+
+        sizes = {
+            50: 3,
+            100: 2,
+            200: 1
+        }
+
+        return sizes.get(self.top_bybit_limit, 1)
+
     def set_scan_mode(self, mode):
+
+        if mode == SCAN_MODE_TOP_BYBIT:
+            if self.is_top_bybit_mode():
+                return
+
+            mode = self.get_top_bybit_mode()
 
         if mode == self.scan_mode:
             return
@@ -218,9 +264,11 @@ class SmartTradeUI:
         self.scan_mode = mode
         self.refresh_index = 0
         self.reset_scan_countdown()
+        self.top50_results = {}
+        self.last_top50_sort_at = time.monotonic()
 
-        if mode == SCAN_MODE_TOP50:
-            self.top50_results = {}
+        if self.is_top_bybit_mode():
+            self.top_bybit_limit = self.get_top_bybit_limit()
             self.load_top50_scan_symbols()
         else:
             self.watchlist_symbols = get_watchlist()
@@ -232,21 +280,48 @@ class SmartTradeUI:
 
     def load_top50_scan_symbols(self):
 
-        symbols = get_top_bybit_symbols(50)
+        symbols = get_top_bybit_symbols(self.top_bybit_limit)
 
         if not symbols:
             messagebox.showwarning(
                 "SmartTrade",
-                "Nie udało się pobrać Top 50 Bybit. Spróbuj ponownie za chwilę."
+                f"Nie udalo sie pobrac Top {self.top_bybit_limit} Bybit. Sprobuj ponownie za chwile."
             )
 
         self.top50_symbols = symbols
         self.coins = [{"symbol": symbol} for symbol in self.top50_symbols]
 
+    def is_top_bybit_mode(self):
+
+        return self.scan_mode in TOP_BYBIT_LIMITS
+
+    def get_top_bybit_limit(self):
+
+        return TOP_BYBIT_LIMITS.get(self.scan_mode, 50)
+
+    def get_top_bybit_mode(self):
+
+        return TOP_BYBIT_MODES_BY_LIMIT.get(self.top_bybit_limit, SCAN_MODE_TOP50)
+
+    def set_top_bybit_limit(self, limit):
+
+        mode = TOP_BYBIT_MODES_BY_LIMIT[limit]
+
+        if self.scan_mode == mode:
+            return
+
+        self.top_bybit_limit = limit
+        self.set_scan_mode(mode)
+
     def update_scan_mode_buttons(self):
 
         for mode, button in self.scan_mode_buttons.items():
-            if mode == self.scan_mode:
+            is_active = (
+                mode == self.scan_mode
+                or mode == SCAN_MODE_TOP_BYBIT and self.is_top_bybit_mode()
+            )
+
+            if is_active:
                 button.configure(fg_color=BLUE, text_color="#FFFFFF", border_color=BLUE)
             else:
                 button.configure(
@@ -256,7 +331,7 @@ class SmartTradeUI:
                 )
 
         if self.watchlist_title_label is not None:
-            title = "WATCHLIST" if self.scan_mode == SCAN_MODE_WATCHLIST else "TOP 50 BYBIT"
+            title = "WATCHLIST" if self.scan_mode == SCAN_MODE_WATCHLIST else f"TOP {self.top_bybit_limit} BYBIT"
             self.watchlist_title_label.configure(text=title)
 
         if self.reset_watchlist_button is not None:
@@ -264,6 +339,30 @@ class SmartTradeUI:
                 self.reset_watchlist_button.configure(state="normal", text_color=TEXT_COLOR)
             else:
                 self.reset_watchlist_button.configure(state="disabled", text_color=GRAY)
+
+        self.update_top_limit_buttons()
+
+    def update_top_limit_buttons(self):
+
+        if self.top_limit_container is None:
+            return
+
+        if self.is_top_bybit_mode():
+            if not self.top_limit_container.winfo_ismapped():
+                self.top_limit_container.pack(fill="x", pady=(8, 0))
+        else:
+            if self.top_limit_container.winfo_ismapped():
+                self.top_limit_container.pack_forget()
+
+        for limit, button in self.top_limit_buttons.items():
+            if limit == self.top_bybit_limit and self.is_top_bybit_mode():
+                button.configure(fg_color=BLUE, text_color="#FFFFFF", border_color=BLUE)
+            else:
+                button.configure(
+                    fg_color=PANEL_COLOR,
+                    text_color=MUTED_TEXT_COLOR,
+                    border_color=BORDER_COLOR
+                )
 
     def update_watchlist_coin(self, coin, index):
 
@@ -279,7 +378,7 @@ class SmartTradeUI:
         divergences = self.find_coin_divergences_from_candles(candles)
         best_divergence = self.select_freshest_best_signal(divergences, len(candles))
 
-        if self.scan_mode == SCAN_MODE_TOP50:
+        if self.is_top_bybit_mode():
             self.top50_results[symbol] = {
                 "symbol": symbol,
                 "rsi": rsi,
@@ -456,6 +555,23 @@ class SmartTradeUI:
                 self.format_filtered_signal(divergence, candle_count)
             )
 
+        card_text = {
+            "symbol": symbol,
+            "status": status,
+            "status_color": status_color,
+            "setup": setup_text,
+            "setup_color": setup_color,
+            "time": signal_time,
+            "age": age_text,
+            "rsi": f"RSI {rsi}"
+        }
+        cache_key = card["symbol_value"]
+
+        if self.last_card_texts.get(cache_key) == card_text:
+            return
+
+        self.last_card_texts[cache_key] = card_text
+
         self.configure_label_if_changed(card["symbol"], text=symbol)
         self.configure_label_if_changed(
             card["status"],
@@ -469,7 +585,7 @@ class SmartTradeUI:
         )
         self.configure_label_if_changed(card["time"], text=signal_time)
         self.configure_label_if_changed(card["age"], text=age_text)
-        self.configure_label_if_changed(card["rsi"], text=f"RSI {rsi}")
+        self.configure_label_if_changed(card["rsi"], text=card_text["rsi"])
 
     def configure_label_if_changed(self, widget, **options):
 
@@ -842,6 +958,8 @@ class SmartTradeUI:
             card["frame"].destroy()
 
         self.buttons = []
+        self.last_card_texts = {}
+        self.cards_by_symbol = {}
 
         editable = self.scan_mode == SCAN_MODE_WATCHLIST
 
@@ -854,9 +972,11 @@ class SmartTradeUI:
             )
 
             card["frame"].pack(fill="x", padx=8, pady=5)
+            card["index"] = index
             self.buttons.append(card)
+            self.cards_by_symbol[coin["symbol"]] = card
 
-            if self.scan_mode == SCAN_MODE_TOP50:
+            if self.is_top_bybit_mode():
                 result = self.top50_results.get(coin["symbol"])
 
                 if result is not None:
@@ -870,7 +990,7 @@ class SmartTradeUI:
 
     def sort_top50_cards(self):
 
-        if self.scan_mode != SCAN_MODE_TOP50:
+        if not self.is_top_bybit_mode():
             return
 
         results = []
@@ -906,24 +1026,24 @@ class SmartTradeUI:
 
         elapsed_ms = (time.monotonic() - self.last_top50_sort_at) * 1000
 
-        if elapsed_ms >= TOP50_SORT_INTERVAL_MS:
+        if elapsed_ms >= TOP_SORT_INTERVAL_MS:
             self.sort_top50_cards()
 
     def update_top50_result_card(self, symbol):
 
-        for index, card in enumerate(self.buttons):
-            if card["symbol_value"] != symbol:
-                continue
+        card = self.cards_by_symbol.get(symbol)
 
-            result = self.top50_results[symbol]
-            self.update_watchlist_card(
-                index,
-                result["symbol"],
-                result["rsi"],
-                result["divergence"],
-                result["candle_count"]
-            )
+        if card is None:
             return
+
+        result = self.top50_results[symbol]
+        self.update_watchlist_card(
+            card["index"],
+            result["symbol"],
+            result["rsi"],
+            result["divergence"],
+            result["candle_count"]
+        )
 
     def reorder_top50_cards(self, sorted_results):
 
@@ -933,20 +1053,22 @@ class SmartTradeUI:
         }
 
         if any(result["symbol"] not in cards_by_symbol for result in sorted_results):
-            self.build_watchlist_cards()
             return
 
         for card in self.buttons:
             card["frame"].pack_forget()
 
         self.buttons = []
+        self.cards_by_symbol = {}
 
         for index, result in enumerate(sorted_results):
             symbol = result["symbol"]
             card = cards_by_symbol[symbol]
 
             card["frame"].pack(fill="x", padx=8, pady=5)
+            card["index"] = index
             self.buttons.append(card)
+            self.cards_by_symbol[symbol] = card
 
             if symbol in self.top50_results:
                 self.update_watchlist_card(
@@ -957,9 +1079,9 @@ class SmartTradeUI:
                     result["candle_count"]
                 )
 
-    def build_scan_mode_controls(self):
+    def build_scan_mode_controls(self, parent):
 
-        container = ctk.CTkFrame(self.watchlist_scroll, fg_color="transparent")
+        container = ctk.CTkFrame(parent, fg_color="transparent")
         container.pack(fill="x", padx=8, pady=(0, 8))
 
         ctk.CTkLabel(
@@ -974,7 +1096,7 @@ class SmartTradeUI:
 
         modes = [
             (SCAN_MODE_WATCHLIST, "Watchlist"),
-            (SCAN_MODE_TOP50, "Top 50")
+            (SCAN_MODE_TOP_BYBIT, "Top Bybit")
         ]
 
         for mode, label in modes:
@@ -992,6 +1114,34 @@ class SmartTradeUI:
             )
             button.pack(side="left", fill="x", expand=True, padx=2)
             self.scan_mode_buttons[mode] = button
+
+        self.top_limit_container = ctk.CTkFrame(container, fg_color="transparent")
+
+        ctk.CTkLabel(
+            self.top_limit_container,
+            text="TOP BYBIT RANGE",
+            font=("Arial", 11, "bold"),
+            text_color=MUTED_TEXT_COLOR
+        ).pack(anchor="w", pady=(0, 4))
+
+        limit_row = ctk.CTkFrame(self.top_limit_container, fg_color="transparent")
+        limit_row.pack(fill="x")
+
+        for limit in (50, 100, 200):
+            button = ctk.CTkButton(
+                limit_row,
+                text=f"Top {limit}",
+                height=30,
+                fg_color=PANEL_COLOR,
+                hover_color=BORDER_COLOR,
+                border_color=BORDER_COLOR,
+                border_width=1,
+                text_color=MUTED_TEXT_COLOR,
+                corner_radius=8,
+                command=lambda value=limit: self.set_top_bybit_limit(value)
+            )
+            button.pack(side="left", fill="x", expand=True, padx=2)
+            self.top_limit_buttons[limit] = button
 
         self.update_scan_mode_buttons()
 
@@ -1062,6 +1212,20 @@ class SmartTradeUI:
 
         self.center.grid_rowconfigure(1, weight=1)
         self.center.grid_columnconfigure(0, weight=1)
+
+        left_controls = ctk.CTkFrame(self.left, fg_color="transparent")
+        left_controls.pack(fill="x")
+
+        self.watchlist_title_label = ctk.CTkLabel(
+            left_controls,
+            text="WATCHLIST",
+            font=("Arial",18,"bold"),
+            text_color=TEXT_COLOR
+        )
+        self.watchlist_title_label.pack(pady=(14, 10))
+
+        self.build_scan_mode_controls(left_controls)
+
         self.watchlist_scroll = ctk.CTkScrollableFrame(
             self.left,
             fg_color=PANEL_COLOR,
@@ -1070,18 +1234,8 @@ class SmartTradeUI:
         )
         self.watchlist_scroll.pack(fill="both", expand=True)
 
-        self.watchlist_title_label = ctk.CTkLabel(
-            self.watchlist_scroll,
-            text="WATCHLIST",
-            font=("Arial",18,"bold"),
-            text_color=TEXT_COLOR
-        )
-        self.watchlist_title_label.pack(pady=(14, 10))
-
-        self.build_scan_mode_controls()
-
         self.reset_watchlist_button = ctk.CTkButton(
-            self.watchlist_scroll,
+            left_controls,
             text="↻ Reset do Top20 Bybit",
             height=34,
             fg_color=PANEL_COLOR,
