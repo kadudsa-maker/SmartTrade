@@ -1,16 +1,23 @@
 import json
-from pathlib import Path
-from pybit.unified_trading import HTTP
-import pandas as pd
 import time
+from pathlib import Path
+
+import pandas as pd
+from pybit.unified_trading import HTTP
+
+from config import (
+    ALL_BYBIT_SYMBOLS_CACHE_TTL,
+    DEFAULT_KLINE_LIMIT,
+    DEFAULT_WATCHLIST_LIMIT,
+    KLINE_CACHE_TTL,
+    SYMBOL_SEARCH_LIMIT,
+    TOP_BYBIT_CACHE_TTL
+)
 from rsi import calculate_latest_rsi
 
 session = HTTP(testnet=False)
 
 WATCHLIST_PATH = Path("data/watchlist.json")
-TOP_BYBIT_CACHE_TTL = 300
-ALL_BYBIT_SYMBOLS_CACHE_TTL = 600
-SYMBOL_SEARCH_LIMIT = 100
 
 # CACHE
 cache = {}
@@ -21,20 +28,8 @@ all_bybit_symbols_cache = {
 }
 
 
-def get_top20():
-
-    response = session.get_tickers(category="linear")
-
-    coins = sorted(
-        response["result"]["list"],
-        key=lambda x: float(x["turnover24h"]),
-        reverse=True
-    )
-
-    return coins[:20]
-
-
 def get_top_bybit_symbols(limit=50):
+    """Return top Bybit USDT linear symbols by 24h turnover, cached per limit."""
 
     cached = top_bybit_cache.get(limit)
 
@@ -75,17 +70,13 @@ def get_top_bybit_symbols(limit=50):
     return symbols
 
 
-def get_top20_usdt_perpetual_symbols(limit=20):
+def get_top20_usdt_perpetual_symbols(limit=DEFAULT_WATCHLIST_LIMIT):
 
     return get_top_bybit_symbols(limit)
 
 
-def get_available_usdt_perpetual_symbols():
-
-    return get_all_bybit_symbols()
-
-
 def get_all_bybit_symbols():
+    """Return every tradable Bybit linear USDT perpetual symbol with a 10 minute cache."""
 
     age = time.time() - all_bybit_symbols_cache["time"]
 
@@ -107,6 +98,7 @@ def get_all_bybit_symbols():
 
 
 def filter_symbols(symbols, query, limit=SYMBOL_SEARCH_LIMIT):
+    """Filter symbols case-insensitively by partial text and cap UI results."""
 
     normalized_query = query.strip().upper()
 
@@ -187,9 +179,10 @@ def reset_watchlist():
     return coins
 
 
-def get_klines(symbol="BTCUSDT", interval="15", limit=300):
+def get_klines(symbol="BTCUSDT", interval="15", limit=DEFAULT_KLINE_LIMIT):
+    """Fetch ascending Bybit kline data with enough history for stable RSI."""
 
-    limit = max(limit, 300)
+    limit = max(limit, DEFAULT_KLINE_LIMIT)
     key = f"{symbol}_{interval}_{limit}"
 
     # jeżeli dane są młodsze niż 30 sekund
@@ -197,7 +190,7 @@ def get_klines(symbol="BTCUSDT", interval="15", limit=300):
 
         age = time.time() - cache[key]["time"]
 
-        if age < 30:
+        if age < KLINE_CACHE_TTL:
 
             return cache[key]["data"]
 
@@ -245,6 +238,7 @@ def calculate_rsi(df, period=14):
 
 
 def get_watchlist():
+    """Load the saved watchlist or rebuild the default Top20 list."""
 
     if not WATCHLIST_PATH.exists():
         return load_default_watchlist()

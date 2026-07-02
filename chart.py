@@ -3,7 +3,7 @@ import tkinter as tk
 import customtkinter as ctk
 import pandas as pd
 import plotly.graph_objects as go
-from config import PIVOT_LEFT, PIVOT_RIGHT
+from config import ACTIVE_MAX_CANDLES, AGING_MAX_CANDLES, PIVOT_LEFT, PIVOT_RIGHT
 from divergence import find_regular_divergences
 from pivots import find_pivots, find_rsi_pivots
 from rsi import calculate_rsi_series
@@ -20,10 +20,6 @@ GREEN = "#2ECC71"
 RED = "#E74C3C"
 YELLOW = "#F1C40F"
 GRAY = "#6E7681"
-
-ACTIVE_MAX_AGE = 5
-AGING_MAX_AGE = 12
-
 
 class SmartTradeChart:
 
@@ -98,12 +94,6 @@ class SmartTradeChart:
         if self.candles.empty:
             return
 
-        self._update_figure()
-        self._draw()
-
-    def set_rsi(self, rsi_data):
-
-        self.rsi_series = rsi_data
         self._update_figure()
         self._draw()
 
@@ -291,10 +281,10 @@ class SmartTradeChart:
 
         age = self._signal_age(divergence)
 
-        if age <= ACTIVE_MAX_AGE:
+        if age <= ACTIVE_MAX_CANDLES:
             return "ACTIVE"
 
-        if age <= AGING_MAX_AGE:
+        if age <= AGING_MAX_CANDLES:
             return "AGING"
 
         return "EXPIRED"

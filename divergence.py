@@ -1,9 +1,5 @@
-from config import PIVOT_RIGHT
+from config import MAX_PIVOT_ALIGNMENT, MAX_PIVOT_DISTANCE, PIVOT_RIGHT
 from signal_quality import calculate_quality_score, calculate_signal_quality
-
-
-MAX_PIVOT_DISTANCE = 60
-MAX_PIVOT_ALIGNMENT = 3
 
 
 def find_regular_divergences(
@@ -14,6 +10,7 @@ def find_regular_divergences(
     rsi_pivot_highs,
     rsi_pivot_lows
 ):
+    """Detect regular RSI divergences from already prepared price and RSI pivots."""
 
     divergences = []
 
@@ -69,7 +66,7 @@ def _find_regular_bullish(df, rsi, price_lows, rsi_lows):
             enrich_divergence_confirmation(divergence, len(df), _candle_times(df))
             divergence["quality"] = calculate_signal_quality(df, divergence, "low")
             divergences.append(divergence)
-            _log_divergence(df, rsi, divergence)
+            _log_divergence(df, divergence)
 
     return divergences
 
@@ -106,7 +103,7 @@ def _find_regular_bearish(df, rsi, price_highs, rsi_highs):
             enrich_divergence_confirmation(divergence, len(df), _candle_times(df))
             divergence["quality"] = calculate_signal_quality(df, divergence, "high")
             divergences.append(divergence)
-            _log_divergence(df, rsi, divergence)
+            _log_divergence(df, divergence)
 
     return divergences
 
@@ -174,7 +171,6 @@ def _build_divergence(kind, price_start, price_end, rsi_start, rsi_end):
         "confirmed_time": None,
         "age_candles": None,
         "quality": None,
-        # Deprecated: kept temporarily for compatibility with earlier code.
         "strength": 0
     }
 
@@ -211,17 +207,12 @@ def _candle_times(df):
     return df["time"]
 
 
-def _log_divergence(df, rsi, divergence):
+def _log_divergence(df, divergence):
 
     symbol = df.attrs.get("symbol", "UNKNOWN")
     name = divergence["type"].capitalize()
     quality = divergence["quality"]
     quality_score = calculate_quality_score(quality)
-    price_start = divergence["price_start"]
-    price_end = divergence["price_end"]
-    rsi_start = divergence["rsi_start"]
-    rsi_end = divergence["rsi_end"]
-    distance = price_end["index"] - price_start["index"]
 
     print("-------------------------------------")
     print(symbol)
@@ -232,25 +223,3 @@ def _log_divergence(df, rsi, divergence):
     print(f"Volume: {quality['volume']}")
     print(f"Quality: {quality_score}")
     print("-------------------------------------")
-
-
-def _divergence_name(kind):
-
-    names = {
-        "bullish": "Regular Bullish",
-        "bearish": "Regular Bearish"
-    }
-
-    return names.get(kind, kind)
-
-
-def _rsi_value(rsi, pivot):
-
-    if "price" in pivot:
-        return pivot["price"]
-
-    try:
-        return rsi.iloc[pivot["index"]]
-
-    except Exception:
-        return pivot["price"]

@@ -2,6 +2,7 @@ from config import PIVOT_LEFT, PIVOT_RIGHT
 
 
 def find_pivots(df, left=PIVOT_LEFT, right=PIVOT_RIGHT):
+    """Find confirmed price pivot highs and lows using left/right candles."""
 
     pivot_highs = []
     pivot_lows = []
@@ -44,6 +45,7 @@ def find_pivots(df, left=PIVOT_LEFT, right=PIVOT_RIGHT):
 
 
 def find_rsi_pivots(rsi, times, left=PIVOT_LEFT, right=PIVOT_RIGHT):
+    """Find confirmed RSI pivots and map them back to original candle indexes."""
 
     rsi_df = _build_rsi_pivot_frame(rsi, times)
 

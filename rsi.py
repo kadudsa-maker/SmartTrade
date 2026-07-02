@@ -2,6 +2,7 @@ import pandas as pd
 
 
 def calculate_rma_series(values, period=14):
+    """Calculate Wilder's RMA seeded with the first period SMA."""
 
     series = pd.Series(values, dtype=float)
     rma = pd.Series(float("nan"), index=series.index, dtype=float)
@@ -22,6 +23,7 @@ def calculate_rma_series(values, period=14):
 
 
 def calculate_rsi_series(close, period=14):
+    """Calculate RSI using close prices and Wilder/RMA smoothing."""
 
     close_series = pd.Series(close, dtype=float)
     rsi = pd.Series(float("nan"), index=close_series.index, dtype=float)

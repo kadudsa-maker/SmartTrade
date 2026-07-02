@@ -1,9 +1,13 @@
-from config import DISTANCE_PROFILE, PIVOT_LEFT, PIVOT_RIGHT
-
-
-IDEAL_MIN_DISTANCE = 20
-IDEAL_MAX_DISTANCE = 45
-MAX_DISTANCE = 60
+from config import (
+    DISTANCE_FALLBACK_LIMIT,
+    DISTANCE_FALLBACK_MAX,
+    DISTANCE_FALLBACK_MIN,
+    DISTANCE_PROFILE,
+    PIVOT_LEFT,
+    PIVOT_RIGHT,
+    QUALITY_WEIGHTS,
+    RSI_STRENGTH_REFERENCE
+)
 
 
 def calculate_pivot_strength(df, pivot, pivot_type, left=PIVOT_LEFT, right=PIVOT_RIGHT):
@@ -29,7 +33,7 @@ def calculate_rsi_strength(rsi_start, rsi_end):
 
     difference = abs(_pivot_value(rsi_end) - _pivot_value(rsi_start))
 
-    return _clamp_score((difference / 20) * 100)
+    return _clamp_score((difference / RSI_STRENGTH_REFERENCE) * 100)
 
 
 def calculate_distance_score(price_start, price_end, timeframe=None):
@@ -96,10 +100,10 @@ def calculate_quality_score(quality):
     volume = quality.get("volume", 50)
 
     return round(
-        (pivot * 0.30)
-        + (rsi * 0.30)
-        + (distance * 0.20)
-        + (volume * 0.20)
+        (pivot * QUALITY_WEIGHTS["pivot"])
+        + (rsi * QUALITY_WEIGHTS["rsi"])
+        + (distance * QUALITY_WEIGHTS["distance"])
+        + (volume * QUALITY_WEIGHTS["volume"])
     )
 
 
@@ -190,7 +194,7 @@ def _distance_profile_for_timeframe(timeframe):
     profile = DISTANCE_PROFILE.get(timeframe)
 
     if profile is None:
-        return IDEAL_MIN_DISTANCE, IDEAL_MAX_DISTANCE, MAX_DISTANCE
+        return DISTANCE_FALLBACK_MIN, DISTANCE_FALLBACK_MAX, DISTANCE_FALLBACK_LIMIT
 
     ideal_min, ideal_max = profile
     max_distance = ideal_max + (ideal_max - ideal_min)

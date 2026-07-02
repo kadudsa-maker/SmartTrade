@@ -1,9 +1,20 @@
 import customtkinter as ctk
 import time
 from tkinter import StringVar, messagebox
+
 from chart import SmartTradeChart
-from config import MIN_VISIBLE_QUALITY, SHOW_EXPIRED_SIGNALS
-from config import PIVOT_LEFT, PIVOT_RIGHT
+from config import (
+    ACTIVE_MAX_CANDLES,
+    AGING_MAX_CANDLES,
+    MIN_VISIBLE_QUALITY,
+    PIVOT_LEFT,
+    PIVOT_RIGHT,
+    SCAN_BATCH_SIZE,
+    SCAN_INTERVAL_MS,
+    SHOW_EXPIRED_SIGNALS,
+    TOP_SCAN_BATCH_SIZES,
+    TOP_SORT_INTERVAL_MS
+)
 from divergence import find_regular_divergences
 from market import (
     calculate_rsi,
@@ -17,6 +28,7 @@ from market import (
 )
 from pivots import find_pivots, find_rsi_pivots
 from rsi import calculate_rsi_series
+from scanner_state import run_scan_batch, scan_mode_label
 from signal_quality import calculate_quality_score
 from time_utils import current_polish_time, format_polish_time
 
@@ -32,12 +44,6 @@ YELLOW = "#F1C40F"
 BLUE = "#3498DB"
 GRAY = "#6E7681"
 
-ACTIVE_MAX_AGE = 5
-AGING_MAX_AGE = 12
-SCAN_INTERVAL_SECONDS = 1
-SCAN_BATCH_SIZE = 3
-SCAN_INTERVAL_MS = 1000
-TOP_SORT_INTERVAL_MS = 10000
 SCAN_MODE_WATCHLIST = "watchlist"
 SCAN_MODE_TOP_BYBIT = "top_bybit"
 SCAN_MODE_TOP50 = "top50"
@@ -87,16 +93,15 @@ class SmartTradeUI:
         self.top_timeframe_label = None
         self.open_chart_label = None
         self.chart_refreshed_label = None
-        self.last_scan_label = None
-        self.next_scan_label = None
-        self.scan_progress_label = None
         self.watchlist_scroll = None
         self.watchlist_title_label = None
         self.reset_watchlist_button = None
 
         self.refresh_index = 0
-        self.next_scan_seconds = SCAN_INTERVAL_SECONDS
         self.last_top50_sort_at = 0
+        self.scan_cycle_number = 0
+        self.last_scan_batch_time = None
+        self.last_full_scan_time = None
 
         self.build_ui()
 
@@ -106,14 +111,12 @@ class SmartTradeUI:
         self.refresh_index = 0
         self.top50_results = {}
         self.last_top50_sort_at = time.monotonic()
-        self.reset_scan_countdown()
-
+        self.reset_scan_cycle_state()
         if self.is_top_bybit_mode():
             self.coins = [{"symbol": symbol} for symbol in self.top50_symbols]
             self.build_watchlist_cards()
 
         self.update_timeframe_buttons()
-        self.update_scan_progress()
         self.refresh_selected()
 
     def update_timeframe_buttons(self):
@@ -149,110 +152,66 @@ class SmartTradeUI:
         df.attrs["symbol"] = self.selected_symbol
         df.attrs["timeframe"] = self.selected_interval
 
-        rsi = calculate_rsi(df)
-
-        price = round(df["close"].iloc[-1], 2)
-
         self.chart.set_candles(df)
-        self.log_selected_chart_debug(df, rsi)
         self.update_open_chart_status(current_polish_time())
-
-    def log_selected_chart_debug(self, df, rsi):
-
-        if df.empty:
-            return
-
-        last_candle = df.iloc[-1]
-        candle_time = format_polish_time(last_candle["time"], include_seconds=True)
-        rsi_text = "n/a" if rsi is None else rsi
-
-        print("-------------------------------------")
-        print("Chart debug")
-        print(f"symbol: {self.selected_symbol}")
-        print(f"timeframe: {self.selected_interval}")
-        print(f"last close: {last_candle['close']}")
-        print(f"last RSI: {rsi_text}")
-        print(f"last candle time: {candle_time}")
-        print("-------------------------------------")
-
-    def refresh_one_coin(self):
-
-        self.scan_one_coin()
 
     def scan_one_coin(self):
 
-        scan_symbols = self.get_scan_symbols()
+        completed_cycle = False
 
-        if not scan_symbols:
-            self.reset_scan_countdown()
-            self.app.after(SCAN_INTERVAL_MS, self.scan_one_coin)
-            return
+        try:
+            scan_symbols = self.get_scan_symbols()
 
-        batch_started_at = time.perf_counter()
-        scanned_count = 0
-        batch_size = self.get_scan_batch_size()
+            if not scan_symbols:
+                return
 
-        while scanned_count < batch_size and scan_symbols:
-            if self.refresh_index >= len(scan_symbols):
-                self.refresh_index = 0
-
-            symbol = scan_symbols[self.refresh_index]
-
-            try:
-                self.update_watchlist_coin({"symbol": symbol}, self.refresh_index)
-            except Exception as e:
-                print(e)
-
-            self.refresh_index += 1
-            scanned_count += 1
-
-            if self.refresh_index >= len(scan_symbols):
-                self.refresh_index = 0
-                break
-
-        if self.is_top_bybit_mode():
-            self.sort_top50_cards_if_needed()
-
-        batch_duration_ms = (time.perf_counter() - batch_started_at) * 1000
-        print(
-            f"Scan batch: mode={self.scan_mode}, "
-            f"coins={scanned_count}, duration={batch_duration_ms:.0f}ms"
-        )
-
-        self.mark_scan_finished()
-
-        self.app.after(SCAN_INTERVAL_MS, self.scan_one_coin)
-
-    def mark_scan_finished(self):
-
-        if self.last_scan_label is not None:
-            self.configure_label_if_changed(
-                self.last_scan_label,
-                text=f"Ostatni skan: {current_polish_time()}"
+            batch_result = run_scan_batch(
+                scan_symbols,
+                self.refresh_index,
+                self.get_scan_batch_size(),
+                lambda symbol, index: self.update_watchlist_coin(
+                    {"symbol": symbol},
+                    index
+                )
             )
+            self.refresh_index = batch_result["next_index"]
+            completed_cycle = batch_result["completed_cycle"]
 
-        self.reset_scan_countdown()
-        self.update_scan_progress()
+            for symbol, error in batch_result["errors"]:
+                print(f"Scan symbol error: {symbol}: {error}")
 
-    def reset_scan_countdown(self):
+            self.last_scan_batch_time = current_polish_time()
 
-        self.next_scan_seconds = SCAN_INTERVAL_SECONDS
+            if self.is_top_bybit_mode():
+                self.sort_top50_cards_if_needed()
 
-    def update_scan_progress(self):
+            if completed_cycle:
+                self.mark_scan_cycle_completed(len(scan_symbols))
 
-        if self.scan_progress_label is None:
-            return
+        except Exception as error:
+            print(f"Scanner loop error: {error}")
 
-        total = len(self.get_scan_symbols())
-        scanned = len(self.top50_results) if self.is_top_bybit_mode() else self.refresh_index
+        finally:
+            self.app.after(SCAN_INTERVAL_MS, self.scan_one_coin)
 
-        if self.scan_mode == SCAN_MODE_WATCHLIST and scanned == 0 and total:
-            scanned = total
+    def mark_scan_cycle_completed(self, symbol_count):
 
-        self.configure_label_if_changed(
-            self.scan_progress_label,
-            text=f"Skan: {min(scanned, total)}/{total}"
+        self.scan_cycle_number += 1
+        self.last_full_scan_time = current_polish_time()
+
+        print(
+            "Scan cycle completed: "
+            f"mode={scan_mode_label(self.scan_mode, self.top_bybit_limit)} "
+            f"symbols={symbol_count} "
+            f"cycle={self.scan_cycle_number} "
+            f"time={self.last_full_scan_time}"
         )
+
+    def reset_scan_cycle_state(self):
+
+        self.scan_cycle_number = 0
+        self.last_scan_batch_time = None
+        self.last_full_scan_time = None
 
     def get_scan_symbols(self):
 
@@ -268,13 +227,7 @@ class SmartTradeUI:
         if not self.is_top_bybit_mode():
             return SCAN_BATCH_SIZE
 
-        sizes = {
-            50: 3,
-            100: 2,
-            200: 1
-        }
-
-        return sizes.get(self.top_bybit_limit, 1)
+        return TOP_SCAN_BATCH_SIZES.get(self.top_bybit_limit, 1)
 
     def set_scan_mode(self, mode):
 
@@ -289,9 +242,9 @@ class SmartTradeUI:
 
         self.scan_mode = mode
         self.refresh_index = 0
-        self.reset_scan_countdown()
         self.top50_results = {}
         self.last_top50_sort_at = time.monotonic()
+        self.reset_scan_cycle_state()
 
         if self.is_top_bybit_mode():
             self.top_bybit_limit = self.get_top_bybit_limit()
@@ -302,7 +255,6 @@ class SmartTradeUI:
 
         self.update_scan_mode_buttons()
         self.build_watchlist_cards()
-        self.update_scan_progress()
 
     def load_top50_scan_symbols(self):
 
@@ -417,11 +369,6 @@ class SmartTradeUI:
 
         self.update_watchlist_card(index, symbol, rsi, best_divergence, len(candles))
 
-    def find_coin_divergences(self, df):
-
-        candles = self.prepare_engine_candles(df)
-        return self.find_coin_divergences_from_candles(candles)
-
     def find_coin_divergences_from_candles(self, candles):
 
         rsi_series = self.calculate_rsi_series(candles["close"])
@@ -444,25 +391,6 @@ class SmartTradeUI:
             price_pivot_lows,
             rsi_pivot_highs,
             rsi_pivot_lows
-        )
-
-    def select_best_divergence(self, divergences, candle_count=None):
-
-        if candle_count is not None:
-            return self.select_freshest_best_signal(
-                divergences,
-                candle_count,
-                visible_only=True
-            )
-
-        return self.select_freshest_best_signal(divergences)
-
-    def select_best_signal(self, divergences, candle_count=None, visible_only=False):
-
-        return self.select_freshest_best_signal(
-            divergences,
-            candle_count,
-            visible_only
         )
 
     def select_freshest_best_signal(self, divergences, candle_count=None, visible_only=False):
@@ -562,10 +490,6 @@ class SmartTradeUI:
 
         return True
 
-    def is_visible_divergence(self, divergence, candle_count):
-
-        return self.is_visible_signal(divergence, candle_count)
-
     def update_watchlist_card(self, index, symbol, rsi, divergence, candle_count):
 
         card = self.buttons[index]
@@ -660,21 +584,6 @@ class SmartTradeUI:
 
         return f"{icon} {status}"
 
-    def format_watchlist_button(self, symbol, rsi, divergence):
-
-        if divergence is None:
-            return f"{symbol}\n—\nRSI {rsi}"
-
-        quality_score = calculate_quality_score(divergence.get("quality"))
-        signal_time = format_polish_time(
-            divergence.get("confirmed_time", divergence["price_end"]["time"])
-        )
-
-        if divergence["type"] == "bullish":
-            return f"{symbol}\n🟢 Bull Q:{quality_score}\n{signal_time} PL\nRSI {rsi}"
-
-        return f"{symbol}\n🔴 Bear Q:{quality_score}\n{signal_time} PL\nRSI {rsi}"
-
     def signal_setup_text(self, divergence):
 
         if divergence is None:
@@ -694,10 +603,10 @@ class SmartTradeUI:
 
         age = self.signal_age(divergence, candle_count)
 
-        if age <= ACTIVE_MAX_AGE:
+        if age <= ACTIVE_MAX_CANDLES:
             return "ACTIVE", GREEN
 
-        if age <= AGING_MAX_AGE:
+        if age <= AGING_MAX_CANDLES:
             return "AGING", YELLOW
 
         return "EXPIRED", GRAY
@@ -1343,19 +1252,6 @@ class SmartTradeUI:
             )
 
         self.app.after(1000, self.update_polish_time)
-
-    def update_scan_countdown(self):
-
-        if self.next_scan_label is not None:
-            self.configure_label_if_changed(
-                self.next_scan_label,
-                text=f"Następny skan za: {self.next_scan_seconds} s"
-            )
-
-        if self.next_scan_seconds > 0:
-            self.next_scan_seconds -= 1
-
-        self.app.after(1000, self.update_scan_countdown)
 
     def build_timeframe_bar(self):
 
