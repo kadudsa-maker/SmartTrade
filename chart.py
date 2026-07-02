@@ -325,6 +325,7 @@ class SmartTradeChart:
 
         candles = df[columns].copy()
         candles.attrs["symbol"] = df.attrs.get("symbol", "UNKNOWN")
+        candles.attrs["timeframe"] = df.attrs.get("timeframe")
 
         candles["time"] = pd.to_numeric(candles["time"])
         candles["time"] = (candles["time"] / 1000).astype(int)

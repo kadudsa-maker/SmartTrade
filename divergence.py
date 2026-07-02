@@ -1,4 +1,4 @@
-from signal_quality import calculate_signal_quality
+from signal_quality import calculate_quality_score, calculate_signal_quality
 
 
 MAX_PIVOT_DISTANCE = 60
@@ -171,7 +171,9 @@ def _build_divergence(kind, price_start, price_end, rsi_start, rsi_end):
 def _log_divergence(df, rsi, divergence):
 
     symbol = df.attrs.get("symbol", "UNKNOWN")
-    name = _divergence_name(divergence["type"])
+    name = divergence["type"].capitalize()
+    quality = divergence["quality"]
+    quality_score = calculate_quality_score(quality)
     price_start = divergence["price_start"]
     price_end = divergence["price_end"]
     rsi_start = divergence["rsi_start"]
@@ -181,22 +183,11 @@ def _log_divergence(df, rsi, divergence):
     print("-------------------------------------")
     print(symbol)
     print(name)
-    print("Price Pivot 1:")
-    print(f"index: {price_start['index']}")
-    print(f"price: {price_start['price']}")
-    print("Price Pivot 2:")
-    print(f"index: {price_end['index']}")
-    print(f"price: {price_end['price']}")
-    print("RSI Pivot 1:")
-    print(f"index: {rsi_start['index']}")
-    print(f"value: {_rsi_value(rsi, rsi_start)}")
-    print("RSI Pivot 2:")
-    print(f"index: {rsi_end['index']}")
-    print(f"value: {_rsi_value(rsi, rsi_end)}")
-    print("Distance:")
-    print(distance)
-    print("Quality:")
-    print(divergence["quality"])
+    print(f"Pivot: {quality['pivot']}")
+    print(f"RSI: {quality['rsi']}")
+    print(f"Distance: {quality['distance']}")
+    print(f"Volume: {quality['volume']}")
+    print(f"Quality: {quality_score}")
     print("-------------------------------------")
 
 

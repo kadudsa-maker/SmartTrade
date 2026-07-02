@@ -145,6 +145,7 @@ class SmartTradeUI:
             interval=self.selected_interval
         )
         df.attrs["symbol"] = self.selected_symbol
+        df.attrs["timeframe"] = self.selected_interval
 
         rsi = calculate_rsi(df)
 
@@ -395,6 +396,7 @@ class SmartTradeUI:
             interval=self.selected_interval
         )
         df.attrs["symbol"] = symbol
+        df.attrs["timeframe"] = self.selected_interval
 
         rsi = calculate_rsi(df)
         candles = self.prepare_engine_candles(df)
@@ -720,6 +722,7 @@ class SmartTradeUI:
 
         candles = df[["time", "open", "high", "low", "close"]].copy()
         candles.attrs["symbol"] = df.attrs.get("symbol", "UNKNOWN")
+        candles.attrs["timeframe"] = self.selected_interval
 
         candles["time"] = candles["time"].astype(float).astype(int) // 1000
 

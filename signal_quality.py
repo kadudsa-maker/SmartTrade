@@ -1,3 +1,6 @@
+from config import DISTANCE_PROFILE
+
+
 IDEAL_MIN_DISTANCE = 20
 IDEAL_MAX_DISTANCE = 45
 MAX_DISTANCE = 60
@@ -29,20 +32,40 @@ def calculate_rsi_strength(rsi_start, rsi_end):
     return _clamp_score((difference / 20) * 100)
 
 
-def calculate_distance_score(price_start, price_end):
+def calculate_distance_score(price_start, price_end, timeframe=None):
 
     distance = abs(price_end["index"] - price_start["index"])
+    ideal_min, ideal_max, max_distance = _distance_profile_for_timeframe(timeframe)
 
-    if distance <= 0 or distance > MAX_DISTANCE:
+    if distance <= 0:
         return 0
 
-    if IDEAL_MIN_DISTANCE <= distance <= IDEAL_MAX_DISTANCE:
+    if ideal_min <= distance <= ideal_max:
         return 100
 
-    if distance < IDEAL_MIN_DISTANCE:
-        return _clamp_score((distance / IDEAL_MIN_DISTANCE) * 100)
+    if distance < ideal_min:
+        return _clamp_score((distance / ideal_min) * 100)
 
-    return _clamp_score(((MAX_DISTANCE - distance) / (MAX_DISTANCE - IDEAL_MAX_DISTANCE)) * 100)
+    return _clamp_score(((max_distance - distance) / (max_distance - ideal_max)) * 100)
+
+
+def calculate_volume_confirmation(df, divergence):
+
+    if df is None or df.empty or "volume" not in df.columns:
+        return 50
+
+    first_average = _average_pivot_volume(df, divergence["price_start"])
+    second_average = _average_pivot_volume(df, divergence["price_end"])
+
+    if first_average <= 0 or second_average < 0:
+        return 50
+
+    ratio = second_average / first_average
+
+    if divergence["type"] == "bearish":
+        return _bearish_volume_score(ratio)
+
+    return _bullish_volume_score(ratio)
 
 
 def calculate_signal_quality(df, divergence, price_pivot_type):
@@ -55,8 +78,10 @@ def calculate_signal_quality(df, divergence, price_pivot_type):
         ),
         "distance": calculate_distance_score(
             divergence["price_start"],
-            divergence["price_end"]
-        )
+            divergence["price_end"],
+            _timeframe_from_df(df)
+        ),
+        "volume": calculate_volume_confirmation(df, divergence)
     }
 
 
@@ -68,8 +93,14 @@ def calculate_quality_score(quality):
     pivot = quality.get("pivot", 0)
     rsi = quality.get("rsi", 0)
     distance = quality.get("distance", 0)
+    volume = quality.get("volume", 50)
 
-    return round((pivot + rsi + distance) / 3)
+    return round(
+        (pivot * 0.30)
+        + (rsi * 0.30)
+        + (distance * 0.20)
+        + (volume * 0.20)
+    )
 
 
 def _calculate_divergence_pivot_strength(df, divergence, price_pivot_type):
@@ -144,6 +175,64 @@ def _local_window(df, index, left, right):
     end = min(len(df), index + right + 1)
 
     return df.iloc[start:end]
+
+
+def _timeframe_from_df(df):
+
+    if df is None:
+        return None
+
+    return df.attrs.get("timeframe")
+
+
+def _distance_profile_for_timeframe(timeframe):
+
+    profile = DISTANCE_PROFILE.get(timeframe)
+
+    if profile is None:
+        return IDEAL_MIN_DISTANCE, IDEAL_MAX_DISTANCE, MAX_DISTANCE
+
+    ideal_min, ideal_max = profile
+    max_distance = ideal_max + (ideal_max - ideal_min)
+
+    return ideal_min, ideal_max, max_distance
+
+
+def _average_pivot_volume(df, pivot, window=2):
+
+    index = pivot["index"]
+
+    if index < 0 or index >= len(df):
+        return 0
+
+    local_window = _local_window(df, index, window, window)
+
+    if local_window.empty:
+        return 0
+
+    volume = local_window["volume"].astype(float)
+    volume = volume[volume >= 0]
+
+    if volume.empty:
+        return 0
+
+    return float(volume.mean())
+
+
+def _bullish_volume_score(ratio):
+
+    if ratio >= 1:
+        return _clamp_score(50 + ((ratio - 1) / 0.5) * 50)
+
+    return _clamp_score(50 - ((1 - ratio) / 0.5) * 50)
+
+
+def _bearish_volume_score(ratio):
+
+    if ratio >= 1:
+        return _clamp_score(50 + ((ratio - 1) / 0.5) * 50)
+
+    return _clamp_score(50 - ((1 - ratio) / 0.5) * 25)
 
 
 def _pivot_value(pivot):

@@ -26,7 +26,7 @@ def _df():
 
 def _assert_quality(divergence):
 
-    assert set(divergence["quality"]) == {"pivot", "rsi", "distance"}
+    assert set(divergence["quality"]) == {"pivot", "rsi", "distance", "volume"}
     assert divergence["strength"] == 0
 
 
