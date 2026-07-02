@@ -5,6 +5,7 @@ import pandas as pd
 import plotly.graph_objects as go
 from divergence import find_regular_divergences
 from pivots import find_pivots, find_rsi_pivots
+from rsi import calculate_rsi_series
 from signal_quality import calculate_quality_score
 from time_utils import format_polish_time
 
@@ -313,16 +314,7 @@ class SmartTradeChart:
 
     def _calculate_rsi(self, close):
 
-        delta = close.diff()
-        gain = delta.clip(lower=0)
-        loss = -delta.clip(upper=0)
-
-        avg_gain = gain.rolling(self.rsi_period).mean()
-        avg_loss = loss.rolling(self.rsi_period).mean()
-
-        rs = avg_gain / avg_loss
-
-        return 100 - (100 / (1 + rs))
+        return calculate_rsi_series(close, period=self.rsi_period)
 
     def _prepare_candles(self, df):
 
@@ -343,7 +335,7 @@ class SmartTradeChart:
         for column in ["open", "high", "low", "close", "volume"]:
             candles[column] = candles[column].astype(float)
 
-        return candles
+        return candles.sort_values("time").reset_index(drop=True)
 
     def _on_mouse_move(self, event):
 

@@ -14,6 +14,7 @@ from market import (
     save_watchlist
 )
 from pivots import find_pivots, find_rsi_pivots
+from rsi import calculate_rsi_series
 from signal_quality import calculate_quality_score
 from time_utils import current_polish_time, format_polish_time
 
@@ -150,7 +151,26 @@ class SmartTradeUI:
         price = round(df["close"].iloc[-1], 2)
 
         self.chart.set_candles(df)
+        self.log_selected_chart_debug(df, rsi)
         self.update_open_chart_status(current_polish_time())
+
+    def log_selected_chart_debug(self, df, rsi):
+
+        if df.empty:
+            return
+
+        last_candle = df.iloc[-1]
+        candle_time = format_polish_time(last_candle["time"], include_seconds=True)
+        rsi_text = "n/a" if rsi is None else rsi
+
+        print("-------------------------------------")
+        print("Chart debug")
+        print(f"symbol: {self.selected_symbol}")
+        print(f"timeframe: {self.selected_interval}")
+        print(f"last close: {last_candle['close']}")
+        print(f"last RSI: {rsi_text}")
+        print(f"last candle time: {candle_time}")
+        print("-------------------------------------")
 
     def refresh_one_coin(self):
 
@@ -706,20 +726,11 @@ class SmartTradeUI:
         for column in ["open", "high", "low", "close"]:
             candles[column] = candles[column].astype(float)
 
-        return candles
+        return candles.sort_values("time").reset_index(drop=True)
 
     def calculate_rsi_series(self, close):
 
-        delta = close.diff()
-        gain = delta.clip(lower=0)
-        loss = -delta.clip(upper=0)
-
-        avg_gain = gain.rolling(14).mean()
-        avg_loss = loss.rolling(14).mean()
-
-        rs = avg_gain / avg_loss
-
-        return 100 - (100 / (1 + rs))
+        return calculate_rsi_series(close, period=14)
 
     def create_watchlist_card(self, parent, symbol, index, editable=True):
 

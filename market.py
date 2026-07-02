@@ -3,6 +3,7 @@ from pathlib import Path
 from pybit.unified_trading import HTTP
 import pandas as pd
 import time
+from rsi import calculate_latest_rsi
 
 session = HTTP(testnet=False)
 
@@ -123,9 +124,10 @@ def reset_watchlist():
     return coins
 
 
-def get_klines(symbol="BTCUSDT", interval="15", limit=200):
+def get_klines(symbol="BTCUSDT", interval="15", limit=300):
 
-    key = f"{symbol}_{interval}"
+    limit = max(limit, 300)
+    key = f"{symbol}_{interval}_{limit}"
 
     # jeżeli dane są młodsze niż 30 sekund
     if key in cache:
@@ -160,7 +162,11 @@ def get_klines(symbol="BTCUSDT", interval="15", limit=200):
         ]
     )
 
-    df["close"] = df["close"].astype(float)
+    df["time"] = pd.to_numeric(df["time"])
+    df = df.sort_values("time").reset_index(drop=True)
+
+    for column in ["open", "high", "low", "close", "volume", "turnover"]:
+        df[column] = df[column].astype(float)
 
     cache[key] = {
         "time": time.time(),
@@ -172,19 +178,9 @@ def get_klines(symbol="BTCUSDT", interval="15", limit=200):
 
 def calculate_rsi(df, period=14):
 
-    delta = df["close"].diff()
+    return calculate_latest_rsi(df["close"], period=period)
 
-    gain = delta.clip(lower=0)
 
-    loss = -delta.clip(upper=0)
-
-    avg_gain = gain.rolling(period).mean()
-
-    avg_loss = loss.rolling(period).mean()
-
-    rs = avg_gain / avg_loss
-
-    return round((100 - (100 / (1 + rs))).iloc[-1], 2)
 def get_watchlist():
 
     if not WATCHLIST_PATH.exists():
