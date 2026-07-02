@@ -1,4 +1,4 @@
-from config import MAX_PIVOT_ALIGNMENT, MAX_PIVOT_DISTANCE, PIVOT_RIGHT
+from config import MAX_PIVOT_DISTANCE, PIVOT_RIGHT, RSI_PIVOT_MATCH_TOLERANCE
 from signal_quality import calculate_quality_score, calculate_signal_quality
 
 
@@ -123,41 +123,46 @@ def _can_compare_price_pivots(first_pivot, second_pivot):
 
 def _find_matching_rsi_pair(rsi_pivots, first_price_index, second_price_index):
 
-    matching_pairs = []
+    rsi_start = _find_nearest_rsi_pivot(rsi_pivots, first_price_index)
+    rsi_end = _find_nearest_rsi_pivot(rsi_pivots, second_price_index)
 
-    for rsi_start, rsi_end in _consecutive_pairs(rsi_pivots):
-        if not _is_rsi_pair_aligned(rsi_start, rsi_end, first_price_index, second_price_index):
-            continue
-
-        alignment_score = (
-            abs(rsi_start["index"] - first_price_index)
-            + abs(rsi_end["index"] - second_price_index)
-        )
-        matching_pairs.append((alignment_score, rsi_start, rsi_end))
-
-    if not matching_pairs:
+    if rsi_start is None or rsi_end is None:
         return None
 
-    _, rsi_start, rsi_end = min(
-        matching_pairs,
-        key=lambda item: item[0]
-    )
+    if rsi_start["index"] >= rsi_end["index"]:
+        return None
 
     return rsi_start, rsi_end
 
 
-def _is_rsi_pair_aligned(rsi_start, rsi_end, first_price_index, second_price_index):
+def _find_nearest_rsi_pivot(rsi_pivots, price_index):
 
-    start_aligned = abs(rsi_start["index"] - first_price_index) <= MAX_PIVOT_ALIGNMENT
-    end_aligned = abs(rsi_end["index"] - second_price_index) <= MAX_PIVOT_ALIGNMENT
+    candidates = [
+        (
+            abs(rsi_pivot["index"] - price_index),
+            rsi_pivot
+        )
+        for rsi_pivot in rsi_pivots
+        if abs(rsi_pivot["index"] - price_index) <= RSI_PIVOT_MATCH_TOLERANCE
+    ]
 
-    return start_aligned and end_aligned
+    if not candidates:
+        return None
+
+    _distance, rsi_pivot = min(
+        candidates,
+        key=lambda item: item[0]
+    )
+
+    return rsi_pivot
 
 
 def _build_divergence(kind, price_start, price_end, rsi_start, rsi_end):
 
     pivot_index = price_end["index"]
     confirmed_index = pivot_index + PIVOT_RIGHT
+    start_index_delta = abs(price_start["index"] - rsi_start["index"])
+    end_index_delta = abs(price_end["index"] - rsi_end["index"])
 
     return {
         "type": kind,
@@ -165,6 +170,8 @@ def _build_divergence(kind, price_start, price_end, rsi_start, rsi_end):
         "price_end": price_end,
         "rsi_start": rsi_start,
         "rsi_end": rsi_end,
+        "start_index_delta": start_index_delta,
+        "end_index_delta": end_index_delta,
         "pivot_index": pivot_index,
         "confirmed_index": confirmed_index,
         "pivot_time": price_end["time"],
