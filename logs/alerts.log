@@ -152,3 +152,101 @@ Backend: plyer
 Reason: 
 
 ----------------------------------------
+[2026-07-06 18:14:54]
+
+FORCE TEST
+
+Sound: OK
+
+Notification: OK
+
+Backend: plyer
+
+Reason: 
+
+----------------------------------------
+[2026-07-06 18:16:07]
+
+ALERT
+
+BIRBUSDT
+
+Bullish
+
+Quality: 61
+
+TF: 30m
+
+Status: AGING
+
+Notification: OK
+
+----------------------------------------
+[2026-07-06 19:04:02]
+
+ALERT
+
+XAGUSDT
+
+Bullish
+
+Quality: 64
+
+TF: 1H
+
+Status: ACTIVE
+
+Notification: OK
+
+----------------------------------------
+[2026-07-06 19:07:12]
+
+ALERT
+
+TSLAUSDT
+
+Bullish
+
+Quality: 77
+
+TF: 1H
+
+Status: ACTIVE
+
+Notification: OK
+
+----------------------------------------
+[2026-07-06 19:07:57]
+
+ALERT
+
+DELLUSDT
+
+Bullish
+
+Quality: 60
+
+TF: 1H
+
+Status: AGING
+
+Notification: OK
+
+----------------------------------------
+[2026-07-06 19:10:59]
+
+ALERT
+
+DELLUSDT
+
+Bullish
+
+Quality: 60
+
+TF: 1H
+
+Status: AGING
+
+Notification: OK
+
+----------------------------------------
