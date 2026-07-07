@@ -250,3 +250,343 @@ Status: AGING
 Notification: OK
 
 ----------------------------------------
+[2026-07-06 20:06:55]
+
+ALERT
+
+LINKUSDT
+
+Bullish
+
+Quality: 62
+
+TF: 1m
+
+Status: AGING
+
+Notification: OK
+
+----------------------------------------
+[2026-07-06 20:07:27]
+
+ALERT
+
+DRAMUSDT
+
+Bullish
+
+Quality: 62
+
+TF: 1m
+
+Status: AGING
+
+Notification: OK
+
+----------------------------------------
+[2026-07-06 20:07:37]
+
+ALERT
+
+VIRTUALUSDT
+
+Bullish
+
+Quality: 67
+
+TF: 1m
+
+Status: AGING
+
+Notification: OK
+
+----------------------------------------
+[2026-07-06 20:07:39]
+
+ALERT
+
+JUPUSDT
+
+Bullish
+
+Quality: 65
+
+TF: 1m
+
+Status: AGING
+
+Notification: OK
+
+----------------------------------------
+[2026-07-06 20:08:22]
+
+ALERT
+
+LINKUSDT
+
+Bullish
+
+Quality: 62
+
+TF: 1m
+
+Status: AGING
+
+Notification: OK
+
+----------------------------------------
+[2026-07-06 20:11:24]
+
+ALERT
+
+LINKUSDT
+
+Bullish
+
+Quality: 62
+
+TF: 1m
+
+Status: AGING
+
+Notification: OK
+
+----------------------------------------
+[2026-07-06 20:18:30]
+
+ALERT
+
+HYPEUSDT
+
+Bearish
+
+Quality: 64
+
+TF: 4H
+
+Status: ACTIVE
+
+Notification: OK
+
+----------------------------------------
+[2026-07-06 20:19:24]
+
+ALERT
+
+DRAMUSDT
+
+Bullish
+
+Quality: 60
+
+TF: 4H
+
+Status: ACTIVE
+
+Notification: OK
+
+----------------------------------------
+[2026-07-06 20:19:45]
+
+ALERT
+
+ALLOUSDT
+
+Bearish
+
+Quality: 63
+
+TF: 4H
+
+Status: AGING
+
+Notification: OK
+
+----------------------------------------
+[2026-07-06 22:01:04]
+
+ALERT
+
+ALLOUSDT
+
+Bearish
+
+Quality: 63
+
+TF: 4H
+
+Status: AGING
+
+Notification: OK
+
+----------------------------------------
+[2026-07-06 22:01:20]
+
+ALERT
+
+HYPEUSDT
+
+Bearish
+
+Quality: 64
+
+TF: 4H
+
+Status: AGING
+
+Notification: OK
+
+----------------------------------------
+[2026-07-06 22:04:04]
+
+ALERT
+
+ALLOUSDT
+
+Bearish
+
+Quality: 63
+
+TF: 4H
+
+Status: AGING
+
+Notification: OK
+
+----------------------------------------
+[2026-07-06 22:04:22]
+
+ALERT
+
+HYPEUSDT
+
+Bearish
+
+Quality: 64
+
+TF: 4H
+
+Status: AGING
+
+Notification: OK
+
+----------------------------------------
+[2026-07-06 22:42:43]
+
+ALERT
+
+TRIAUSDT
+
+Bearish
+
+Quality: 62
+
+TF: 15m
+
+Status: AGING
+
+Notification: OK
+
+----------------------------------------
+[2026-07-06 22:44:01]
+
+ALERT
+
+LDOUSDT
+
+Bearish
+
+Quality: 63
+
+TF: 15m
+
+Status: AGING
+
+Notification: OK
+
+----------------------------------------
+[2026-07-06 22:45:07]
+
+ALERT
+
+BSBUSDT
+
+Bullish
+
+Quality: 61
+
+TF: 15m
+
+Status: ACTIVE
+
+Notification: OK
+
+----------------------------------------
+[2026-07-06 22:45:43]
+
+ALERT
+
+TRIAUSDT
+
+Bearish
+
+Quality: 62
+
+TF: 15m
+
+Status: AGING
+
+Notification: OK
+
+----------------------------------------
+[2026-07-06 22:47:51]
+
+ALERT
+
+TRIAUSDT
+
+Bearish
+
+Quality: 62
+
+TF: 15m
+
+Status: AGING
+
+Notification: OK
+
+----------------------------------------
+[2026-07-06 22:49:02]
+
+ALERT
+
+LDOUSDT
+
+Bearish
+
+Quality: 63
+
+TF: 15m
+
+Status: AGING
+
+Notification: OK
+
+----------------------------------------
+[2026-07-06 22:50:52]
+
+ALERT
+
+TRIAUSDT
+
+Bearish
+
+Quality: 62
+
+TF: 15m
+
+Status: AGING
+
+Notification: OK
+
+----------------------------------------

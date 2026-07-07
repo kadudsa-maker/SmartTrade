@@ -1,7 +1,7 @@
 {
   "alerts_enabled": true,
   "minimum_quality": 60,
-  "scan_range": "top100",
+  "scan_range": "top200",
   "bullish": true,
   "bearish": true,
   "active": true,
