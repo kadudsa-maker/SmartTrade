@@ -71,6 +71,18 @@ ALERT_SCAN_RANGES = [
     (SCAN_MODE_TOP100, "Top 100"),
     (SCAN_MODE_TOP200, "Top 200")
 ]
+RSI_VIEW_OFF = "RSI OFF"
+RSI_VIEW_ON = "RSI ON"
+RSI_VIEW_SORT = "RSI Sort"
+RSI_VIEW_QUALITY_SORT = "RSI + Quality Sort"
+RSI_SORT_MODE_QUALITY = "quality"
+RSI_SORT_MODE_RSI = "rsi"
+RSI_SORT_MODE_RSI_QUALITY = "rsi_quality"
+RSI_SORT_LABELS = {
+    RSI_SORT_MODE_QUALITY: "Sort: Quality",
+    RSI_SORT_MODE_RSI: "Sort: RSI",
+    RSI_SORT_MODE_RSI_QUALITY: "Sort: RSI + Quality"
+}
 
 
 class SmartTradeUI:
@@ -110,6 +122,10 @@ class SmartTradeUI:
         self.reset_watchlist_button = None
         self.alert_notification_status_label = None
         self.alert_sound_status_label = None
+        self.rsi_view_option = StringVar(value=RSI_VIEW_OFF)
+        self.rsi_view_menu = None
+        self.rsi_sort_mode = RSI_SORT_MODE_QUALITY
+        self.rsi_sort_mode_label = None
 
         self.refresh_index = 0
         self.last_top50_sort_at = 0
@@ -479,6 +495,9 @@ class SmartTradeUI:
         divergence = result.get("divergence")
         rsi = result.get("rsi") or 0
 
+        if self.sorts_by_rsi_view():
+            return self.rsi_view_sort_key(result)
+
         if divergence is None:
             return 0, -1, 0, rsi
 
@@ -496,6 +515,106 @@ class SmartTradeUI:
         quality_score = calculate_quality_score(divergence.get("quality"))
 
         return priorities.get(status, 0), freshness, quality_score, rsi
+
+    def rsi_view_sort_key(self, result):
+
+        divergence = result.get("divergence")
+        rsi = result.get("rsi") or 0
+
+        if divergence is None:
+            return 0, -999999, self.rsi_extreme_score(rsi), 0
+
+        status = self.signal_filter_status(
+            divergence,
+            result.get("candle_count")
+        )
+        candle_count = result.get("candle_count")
+        age = 999999 if candle_count is None else self.signal_age(divergence, candle_count)
+        quality_score = calculate_quality_score(divergence.get("quality"))
+
+        return (
+            self.rsi_status_priority(status),
+            -age,
+            self.rsi_extreme_score(rsi),
+            quality_score
+        )
+
+    def rsi_extreme_score(self, rsi):
+
+        try:
+            return abs(float(rsi) - 50)
+        except (TypeError, ValueError):
+            return 0
+
+    def rsi_status_priority(self, status):
+
+        priorities = {
+            "ACTIVE": 3,
+            "AGING": 2,
+            "FILTERED": 1,
+            "EXPIRED": 1
+        }
+
+        return priorities.get(status, 0)
+
+    def sorts_by_rsi_view(self):
+
+        return getattr(self, "rsi_sort_mode", RSI_SORT_MODE_QUALITY) in (
+            RSI_SORT_MODE_RSI,
+            RSI_SORT_MODE_RSI_QUALITY
+        )
+
+    def is_rsi_view_enabled(self):
+
+        return (
+            self.current_rsi_view_option() != RSI_VIEW_OFF
+            or self.sorts_by_rsi_view()
+        )
+
+    def current_rsi_view_option(self):
+
+        option = getattr(self, "rsi_view_option", None)
+
+        if option is None:
+            return RSI_VIEW_OFF
+
+        return option.get()
+
+    def apply_rsi_view_option(self, option):
+
+        rsi_view_option = getattr(self, "rsi_view_option", None)
+
+        if rsi_view_option is not None:
+            rsi_view_option.set(option)
+
+        if option == RSI_VIEW_OFF:
+            self.rsi_sort_mode = RSI_SORT_MODE_QUALITY
+        elif option == RSI_VIEW_SORT:
+            self.rsi_sort_mode = RSI_SORT_MODE_RSI
+        elif option == RSI_VIEW_QUALITY_SORT:
+            self.rsi_sort_mode = RSI_SORT_MODE_RSI_QUALITY
+        else:
+            self.rsi_sort_mode = RSI_SORT_MODE_QUALITY
+
+        self.update_rsi_sort_mode_label()
+        self.refresh_rsi_view()
+
+    def update_rsi_sort_mode_label(self):
+
+        if getattr(self, "rsi_sort_mode_label", None) is None:
+            return
+
+        self.configure_label_if_changed(
+            self.rsi_sort_mode_label,
+            text=RSI_SORT_LABELS.get(self.rsi_sort_mode, "Sort: Quality")
+        )
+
+    def refresh_rsi_view(self):
+
+        self.last_card_texts = {}
+
+        if self.is_top_bybit_mode():
+            self.sort_top50_cards()
 
     def is_visible_signal(self, divergence, candle_count):
 
@@ -1175,6 +1294,43 @@ class SmartTradeUI:
             command=self.open_alert_settings
         )
         self.alerts_button.pack(side="right", padx=(0, 14))
+
+        self.rsi_view_menu = ctk.CTkOptionMenu(
+            top_bar,
+            values=[
+                RSI_VIEW_ON,
+                RSI_VIEW_OFF,
+                RSI_VIEW_SORT,
+                RSI_VIEW_QUALITY_SORT
+            ],
+            variable=self.rsi_view_option,
+            command=self.apply_rsi_view_option,
+            width=136,
+            height=28,
+            fg_color=BORDER_COLOR,
+            button_color=PANEL_COLOR,
+            button_hover_color=BORDER_COLOR,
+            dropdown_fg_color=PANEL_COLOR,
+            dropdown_hover_color=BORDER_COLOR,
+            dropdown_text_color=TEXT_COLOR,
+            text_color=TEXT_COLOR
+        )
+        self.rsi_view_menu.pack(side="right", padx=(0, 10))
+
+        ctk.CTkLabel(
+            top_bar,
+            text="RSI View",
+            font=("Arial", 12, "bold"),
+            text_color=MUTED_TEXT_COLOR
+        ).pack(side="right", padx=(0, 8))
+
+        self.rsi_sort_mode_label = ctk.CTkLabel(
+            top_bar,
+            text=RSI_SORT_LABELS[RSI_SORT_MODE_QUALITY],
+            font=("Arial", 12, "bold"),
+            text_color=TEXT_COLOR
+        )
+        self.rsi_sort_mode_label.pack(side="right", padx=(0, 12))
 
     def update_open_chart_status(self, refreshed_at):
 
