@@ -1,4 +1,5 @@
 from ui import (
+    GREEN,
     RSI_SORT_MODE_QUALITY,
     RSI_SORT_MODE_RSI,
     RSI_SORT_MODE_RSI_QUALITY,
@@ -6,7 +7,9 @@ from ui import (
     RSI_VIEW_ON,
     RSI_VIEW_QUALITY_SORT,
     RSI_VIEW_SORT,
-    SmartTradeUI
+    RED,
+    SmartTradeUI,
+    TEXT_COLOR
 )
 
 
@@ -29,6 +32,25 @@ class FakeAlertManager:
 
     def process_signal(self, *args, **kwargs):
         self.calls.append((args, kwargs))
+
+
+class FakeCell:
+
+    def __init__(self, mapped=True):
+        self.mapped = mapped
+        self.grid_calls = 0
+        self.grid_remove_calls = 0
+
+    def winfo_ismapped(self):
+        return self.mapped
+
+    def grid(self):
+        self.mapped = True
+        self.grid_calls += 1
+
+    def grid_remove(self):
+        self.mapped = False
+        self.grid_remove_calls += 1
 
 
 def _ui_with_rsi_mode(sort_mode=RSI_SORT_MODE_QUALITY, view_option=RSI_VIEW_OFF):
@@ -85,7 +107,48 @@ def test_rsi_extreme_score_is_distance_from_50():
 
     assert ui.rsi_extreme_score(90) == ui.rsi_extreme_score(10)
     assert ui.rsi_extreme_score(50) == 0
+    assert ui.rsi_extreme_score(90) == 80
+    assert ui.rsi_extreme_score(10) == 80
+    assert ui.rsi_extreme_score(70) == 40
+    assert ui.rsi_extreme_score(30) == 40
     assert ui.rsi_extreme_score(80) > ui.rsi_extreme_score(60)
+
+
+def test_rsi_value_color_uses_extreme_thresholds():
+
+    ui = _ui_with_rsi_mode()
+
+    assert ui.rsi_value_color(71) == RED
+    assert ui.rsi_value_color(29) == GREEN
+    assert ui.rsi_value_color(30) == TEXT_COLOR
+    assert ui.rsi_value_color(70) == TEXT_COLOR
+    assert ui.rsi_value_color(50) == TEXT_COLOR
+
+
+def test_rsi_on_shows_rsi_without_changing_sort_mode():
+
+    ui = _ui_with_rsi_mode(RSI_SORT_MODE_QUALITY, RSI_VIEW_OFF)
+    ui.is_top_bybit_mode = lambda: False
+    rsi_cell = FakeCell(mapped=False)
+
+    ui.apply_rsi_view_option(RSI_VIEW_ON)
+    ui.update_rsi_card_visibility({"rsi_cell": rsi_cell})
+
+    assert ui.rsi_sort_mode == RSI_SORT_MODE_QUALITY
+    assert rsi_cell.mapped is True
+
+
+def test_rsi_off_hides_rsi_and_resets_rsi_sort_to_quality():
+
+    ui = _ui_with_rsi_mode(RSI_SORT_MODE_RSI, RSI_VIEW_SORT)
+    ui.is_top_bybit_mode = lambda: False
+    rsi_cell = FakeCell(mapped=True)
+
+    ui.apply_rsi_view_option(RSI_VIEW_OFF)
+    ui.update_rsi_card_visibility({"rsi_cell": rsi_cell})
+
+    assert ui.rsi_sort_mode == RSI_SORT_MODE_QUALITY
+    assert rsi_cell.mapped is False
 
 
 def test_rsi_sort_keeps_fresh_signal_above_expired_extreme_rsi():
@@ -106,24 +169,75 @@ def test_rsi_sort_uses_rsi_extreme_for_similar_freshness():
     assert ui.get_signal_sort_key(more_extreme) > ui.get_signal_sort_key(less_extreme)
 
 
-def test_rsi_quality_sort_prioritizes_rsi_extreme_over_quality():
+def test_rsi_sort_prefers_one_candle_ago_over_three_candles_ago():
 
-    ui = _ui_with_rsi_mode(RSI_SORT_MODE_RSI_QUALITY, RSI_VIEW_QUALITY_SORT)
-    higher_quality_less_extreme = _result(rsi=60, quality=95, age_candles=1)
-    lower_quality_more_extreme = _result(rsi=90, quality=65, age_candles=1)
+    ui = _ui_with_rsi_mode(RSI_SORT_MODE_RSI, RSI_VIEW_SORT)
+    one_candle_ago = _result(rsi=60, quality=60, age_candles=1)
+    three_candles_ago = _result(rsi=95, quality=95, age_candles=3)
+
+    assert ui.get_signal_sort_key(one_candle_ago) > ui.get_signal_sort_key(three_candles_ago)
+
+
+def test_rsi_sort_prefers_two_candles_ago_over_older_setup():
+
+    ui = _ui_with_rsi_mode(RSI_SORT_MODE_RSI, RSI_VIEW_SORT)
+    two_candles_ago = _result(rsi=60, quality=60, age_candles=2)
+    older_setup = _result(rsi=95, quality=95, age_candles=5)
+
+    assert ui.get_signal_sort_key(two_candles_ago) > ui.get_signal_sort_key(older_setup)
+
+
+def test_rsi_sort_for_old_setups_prioritizes_rsi_extreme_over_age():
+
+    ui = _ui_with_rsi_mode(RSI_SORT_MODE_RSI, RSI_VIEW_SORT)
+    less_extreme_newer_old_setup = _result(rsi=60, quality=70, age_candles=5)
+    more_extreme_older_setup = _result(rsi=95, quality=70, age_candles=6)
 
     assert (
-        ui.get_signal_sort_key(lower_quality_more_extreme)
-        > ui.get_signal_sort_key(higher_quality_less_extreme)
+        ui.get_signal_sort_key(more_extreme_older_setup)
+        > ui.get_signal_sort_key(less_extreme_newer_old_setup)
     )
 
 
-def test_rsi_quality_sort_uses_quality_for_similar_rsi_extreme():
+def test_rsi_sort_does_not_use_quality_as_criterion():
+
+    ui = _ui_with_rsi_mode(RSI_SORT_MODE_RSI, RSI_VIEW_SORT)
+    lower_quality = _result(rsi=80, quality=70, age_candles=2)
+    higher_quality = _result(rsi=80, quality=95, age_candles=2)
+
+    assert ui.get_signal_sort_key(lower_quality) == ui.get_signal_sort_key(higher_quality)
+
+
+def test_rsi_quality_sort_uses_freshness_before_quality_priority():
 
     ui = _ui_with_rsi_mode(RSI_SORT_MODE_RSI_QUALITY, RSI_VIEW_QUALITY_SORT)
-    lower_quality = _result(rsi=80, quality=65, age_candles=1)
-    higher_quality = _result(rsi=80, quality=90, age_candles=1)
+    fresher_lower_quality = _result(rsi=60, quality=60, age_candles=1)
+    older_higher_quality = _result(rsi=95, quality=95, age_candles=2)
 
+    assert ui.get_signal_sort_key(fresher_lower_quality) > ui.get_signal_sort_key(older_higher_quality)
+
+
+def test_rsi_quality_sort_quality_above_65_prioritizes_over_rsi_extreme():
+
+    ui = _ui_with_rsi_mode(RSI_SORT_MODE_RSI_QUALITY, RSI_VIEW_QUALITY_SORT)
+    quality_priority = _result(rsi=85, quality=66, age_candles=2)
+    lower_quality_more_extreme = _result(rsi=95, quality=55, age_candles=2)
+
+    assert (
+        ui.get_signal_sort_key(quality_priority)
+        > ui.get_signal_sort_key(lower_quality_more_extreme)
+    )
+
+
+def test_rsi_quality_sort_uses_rsi_then_quality_then_average():
+
+    ui = _ui_with_rsi_mode(RSI_SORT_MODE_RSI_QUALITY, RSI_VIEW_QUALITY_SORT)
+    less_extreme = _result(rsi=70, quality=70, age_candles=2)
+    more_extreme = _result(rsi=80, quality=70, age_candles=2)
+    lower_quality = _result(rsi=80, quality=70, age_candles=2)
+    higher_quality = _result(rsi=80, quality=75, age_candles=2)
+
+    assert ui.get_signal_sort_key(more_extreme) > ui.get_signal_sort_key(less_extreme)
     assert ui.get_signal_sort_key(higher_quality) > ui.get_signal_sort_key(lower_quality)
 
 
@@ -140,26 +254,14 @@ def test_rsi_sort_does_not_change_quality_or_rsi():
     assert result["rsi"] == rsi_before
 
 
-def test_rsi_off_resets_rsi_sort_to_quality():
+def test_rsi_on_does_not_change_sort_mode():
 
     ui = _ui_with_rsi_mode(RSI_SORT_MODE_RSI, RSI_VIEW_SORT)
     ui.is_top_bybit_mode = lambda: False
-    ui.build_watchlist_cards = lambda: None
-
-    ui.apply_rsi_view_option(RSI_VIEW_OFF)
-
-    assert ui.rsi_sort_mode == RSI_SORT_MODE_QUALITY
-
-
-def test_rsi_on_does_not_change_sort_mode():
-
-    ui = _ui_with_rsi_mode(RSI_SORT_MODE_QUALITY, RSI_VIEW_OFF)
-    ui.is_top_bybit_mode = lambda: False
-    ui.build_watchlist_cards = lambda: None
 
     ui.apply_rsi_view_option(RSI_VIEW_ON)
 
-    assert ui.rsi_sort_mode == RSI_SORT_MODE_QUALITY
+    assert ui.rsi_sort_mode == RSI_SORT_MODE_RSI
 
 
 def test_alerts_use_base_quality_with_rsi_sort_enabled():

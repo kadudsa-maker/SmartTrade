@@ -590,3 +590,156 @@ Status: AGING
 Notification: OK
 
 ----------------------------------------
+[2026-07-08 12:01:55]
+
+ALERT
+
+GRAMUSDT
+
+Bullish
+
+Quality: 62
+
+TF: 30m
+
+Status: ACTIVE
+
+Notification: OK
+
+----------------------------------------
+[2026-07-08 12:03:38]
+
+ALERT
+
+ETHFIUSDT
+
+Bullish
+
+Quality: 66
+
+TF: 30m
+
+Status: ACTIVE
+
+Notification: OK
+
+----------------------------------------
+[2026-07-08 12:03:45]
+
+ALERT
+
+MNTUSDT
+
+Bullish
+
+Quality: 71
+
+TF: 30m
+
+Status: ACTIVE
+
+Notification: OK
+
+----------------------------------------
+[2026-07-08 12:04:04]
+
+ALERT
+
+DEXEUSDT
+
+Bullish
+
+Quality: 60
+
+TF: 30m
+
+Status: AGING
+
+Notification: OK
+
+----------------------------------------
+[2026-07-08 12:07:04]
+
+ALERT
+
+DEXEUSDT
+
+Bullish
+
+Quality: 60
+
+TF: 30m
+
+Status: AGING
+
+Notification: OK
+
+----------------------------------------
+[2026-07-08 12:39:18]
+
+ALERT
+
+GRAMUSDT
+
+Bullish
+
+Quality: 62
+
+TF: 30m
+
+Status: ACTIVE
+
+Notification: OK
+
+----------------------------------------
+[2026-07-08 12:40:07]
+
+ALERT
+
+ETHFIUSDT
+
+Bullish
+
+Quality: 66
+
+TF: 30m
+
+Status: ACTIVE
+
+Notification: OK
+
+----------------------------------------
+[2026-07-08 12:40:40]
+
+ALERT
+
+MNTUSDT
+
+Bullish
+
+Quality: 71
+
+TF: 30m
+
+Status: ACTIVE
+
+Notification: OK
+
+----------------------------------------
+[2026-07-08 12:41:08]
+
+ALERT
+
+DEXEUSDT
+
+Bullish
+
+Quality: 60
+
+TF: 30m
+
+Status: AGING
+
+Notification: OK
+
+----------------------------------------

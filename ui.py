@@ -46,9 +46,12 @@ TEXT_COLOR = "#EAEAEA"
 MUTED_TEXT_COLOR = "#8D96A0"
 GREEN = "#2ECC71"
 RED = "#E74C3C"
-YELLOW = "#F1C40F"
+ORANGE = "#E67E22"
 BLUE = "#3498DB"
 GRAY = "#6E7681"
+CARD_HEIGHT = 62
+STATUS_FILTERED_COLOR = "#4B525C"
+RSI_QUALITY_PRIORITY_THRESHOLD = 65
 
 SCAN_MODE_WATCHLIST = "watchlist"
 SCAN_MODE_TOP_BYBIT = "top_bybit"
@@ -522,7 +525,7 @@ class SmartTradeUI:
         rsi = result.get("rsi") or 0
 
         if divergence is None:
-            return 0, -999999, self.rsi_extreme_score(rsi), 0
+            return 0, 0, -999999, 0, 0
 
         status = self.signal_filter_status(
             divergence,
@@ -531,18 +534,52 @@ class SmartTradeUI:
         candle_count = result.get("candle_count")
         age = 999999 if candle_count is None else self.signal_age(divergence, candle_count)
         quality_score = calculate_quality_score(divergence.get("quality"))
+        rsi_extreme = self.rsi_extreme_score(rsi)
+
+        if getattr(self, "rsi_sort_mode", RSI_SORT_MODE_QUALITY) == RSI_SORT_MODE_RSI_QUALITY:
+            return self.rsi_quality_sort_key(status, age, rsi_extreme, quality_score)
+
+        return self.rsi_sort_key(status, age, rsi_extreme)
+
+    def rsi_sort_key(self, status, age, rsi_extreme):
+
+        is_fresh = self.is_fresh_rsi_setup(age)
+
+        if is_fresh:
+            primary = -age
+            secondary = rsi_extreme
+        else:
+            primary = rsi_extreme
+            secondary = -age
+
+        return (
+            self.rsi_status_priority(status),
+            1 if is_fresh else 0,
+            primary,
+            secondary
+        )
+
+    def rsi_quality_sort_key(self, status, age, rsi_extreme, quality_score):
+
+        rsi_quality_average = (rsi_extreme + quality_score) / 2
 
         return (
             self.rsi_status_priority(status),
             -age,
-            self.rsi_extreme_score(rsi),
-            quality_score
+            1 if quality_score > RSI_QUALITY_PRIORITY_THRESHOLD else 0,
+            rsi_extreme,
+            quality_score,
+            rsi_quality_average
         )
+
+    def is_fresh_rsi_setup(self, age):
+
+        return 0 <= age <= 3
 
     def rsi_extreme_score(self, rsi):
 
         try:
-            return abs(float(rsi) - 50)
+            return abs(float(rsi) - 50) * 2
         except (TypeError, ValueError):
             return 0
 
@@ -593,8 +630,6 @@ class SmartTradeUI:
             self.rsi_sort_mode = RSI_SORT_MODE_RSI
         elif option == RSI_VIEW_QUALITY_SORT:
             self.rsi_sort_mode = RSI_SORT_MODE_RSI_QUALITY
-        else:
-            self.rsi_sort_mode = RSI_SORT_MODE_QUALITY
 
         self.update_rsi_sort_mode_label()
         self.refresh_rsi_view()
@@ -612,6 +647,9 @@ class SmartTradeUI:
     def refresh_rsi_view(self):
 
         self.last_card_texts = {}
+
+        for card in getattr(self, "buttons", []):
+            self.update_rsi_card_visibility(card)
 
         if self.is_top_bybit_mode():
             self.sort_top50_cards()
@@ -639,28 +677,35 @@ class SmartTradeUI:
             status_color = GRAY
             setup_text = "—"
             setup_color = MUTED_TEXT_COLOR
+            quality_text = "Q:—"
             signal_time = ""
             age_text = ""
         elif self.is_visible_signal(divergence, candle_count):
             status, status_color = self.signal_status(divergence, candle_count)
             status = self.format_status_label(status)
             setup_text, setup_color = self.signal_setup_text(divergence)
+            quality_text = self.signal_quality_text(divergence)
             signal_time = self.signal_time_text(divergence)
             age_text = self.signal_age_text(divergence, candle_count)
         else:
-            status, status_color, setup_text, setup_color, signal_time, age_text = (
+            status, status_color, setup_text, setup_color, quality_text, signal_time, age_text = (
                 self.format_filtered_signal(divergence, candle_count)
             )
 
+        rsi_text = self.format_rsi_text(rsi)
+        rsi_color = self.rsi_value_color(rsi)
         card_text = {
             "symbol": symbol,
+            "market": "USDT Perpetual",
             "status": status,
             "status_color": status_color,
             "setup": setup_text,
             "setup_color": setup_color,
+            "quality": quality_text,
             "time": signal_time,
             "age": age_text,
-            "rsi": f"RSI {rsi}"
+            "rsi": rsi_text,
+            "rsi_color": rsi_color
         }
         cache_key = card["symbol_value"]
 
@@ -670,6 +715,7 @@ class SmartTradeUI:
         self.last_card_texts[cache_key] = card_text
 
         self.configure_label_if_changed(card["symbol"], text=symbol)
+        self.configure_card_label_if_present(card, "market", text=card_text["market"])
         self.configure_label_if_changed(
             card["status"],
             text=status,
@@ -680,9 +726,43 @@ class SmartTradeUI:
             text=setup_text,
             text_color=setup_color
         )
-        self.configure_label_if_changed(card["time"], text=signal_time)
+        self.configure_card_label_if_present(
+            card,
+            "quality",
+            text=quality_text,
+            text_color=TEXT_COLOR
+        )
+        self.configure_card_label_if_present(card, "time", text=signal_time)
         self.configure_label_if_changed(card["age"], text=age_text)
-        self.configure_label_if_changed(card["rsi"], text=card_text["rsi"])
+        self.update_rsi_card_visibility(card)
+        self.configure_label_if_changed(
+            card["rsi"],
+            text=card_text["rsi"],
+            text_color=rsi_color
+        )
+
+    def update_rsi_card_visibility(self, card):
+
+        rsi_cell = card.get("rsi_cell")
+
+        if rsi_cell is None:
+            return
+
+        if self.is_rsi_view_enabled():
+            if not rsi_cell.winfo_ismapped():
+                rsi_cell.grid()
+        else:
+            if rsi_cell.winfo_ismapped():
+                rsi_cell.grid_remove()
+
+    def configure_card_label_if_present(self, card, key, **options):
+
+        widget = card.get(key)
+
+        if widget is None:
+            return
+
+        self.configure_label_if_changed(widget, **options)
 
     def configure_label_if_changed(self, widget, **options):
 
@@ -702,39 +782,71 @@ class SmartTradeUI:
         signal_time = self.signal_time_text(divergence)
         age_text = self.signal_age_text(divergence, candle_count)
 
-        if status == "EXPIRED":
-            filter_status = "⚪ Expired"
-        else:
-            filter_status = "⚪ Filtered"
+        quality_text = self.signal_quality_text(divergence)
 
-        return filter_status, GRAY, setup_text, setup_color, signal_time, age_text
+        if status == "EXPIRED":
+            filter_status = "EXPIRED"
+            filter_color = GRAY
+        else:
+            filter_status = "FILTERED"
+            filter_color = STATUS_FILTERED_COLOR
+
+        return (
+            filter_status,
+            filter_color,
+            setup_text,
+            setup_color,
+            quality_text,
+            signal_time,
+            age_text
+        )
 
     def format_status_label(self, status):
 
-        icons = {
-            "ACTIVE": "🟢",
-            "AGING": "🟡",
-            "EXPIRED": "⚪"
-        }
-
-        icon = icons.get(status)
-
-        if icon is None:
-            return status
-
-        return f"{icon} {status}"
+        return status
 
     def signal_setup_text(self, divergence):
 
         if divergence is None:
             return "—", MUTED_TEXT_COLOR
 
+        if divergence["type"] == "bullish":
+            return "Bull", GREEN
+
+        return "Bear", RED
+
+    def signal_quality_text(self, divergence):
+
+        if divergence is None:
+            return "Q:—"
+
         quality_score = calculate_quality_score(divergence.get("quality"))
 
-        if divergence["type"] == "bullish":
-            return f"Bull Q:{quality_score}", GREEN
+        return f"Q:{quality_score}"
 
-        return f"Bear Q:{quality_score}", RED
+    def format_rsi_text(self, rsi):
+
+        try:
+            value = float(rsi)
+        except (TypeError, ValueError):
+            return "—"
+
+        return f"{value:.1f}".rstrip("0").rstrip(".")
+
+    def rsi_value_color(self, rsi):
+
+        try:
+            value = float(rsi)
+        except (TypeError, ValueError):
+            return TEXT_COLOR
+
+        if value > 70:
+            return RED
+
+        if value < 30:
+            return GREEN
+
+        return TEXT_COLOR
 
     def signal_status(self, divergence, candle_count):
 
@@ -747,7 +859,7 @@ class SmartTradeUI:
             return "ACTIVE", GREEN
 
         if age <= AGING_MAX_CANDLES:
-            return "AGING", YELLOW
+            return "AGING", ORANGE
 
         return "EXPIRED", GRAY
 
@@ -804,21 +916,34 @@ class SmartTradeUI:
             fg_color=BG_COLOR,
             border_color=BORDER_COLOR,
             border_width=1,
-            corner_radius=8
+            corner_radius=6,
+            height=CARD_HEIGHT
         )
+        frame.pack_propagate(False)
+        frame.grid_propagate(False)
+        frame.grid_columnconfigure(0, weight=1, minsize=88)
+        frame.grid_columnconfigure(1, weight=0, minsize=42)
+        frame.grid_columnconfigure(2, weight=0, minsize=46)
+        frame.grid_columnconfigure(3, weight=0, minsize=48)
+        frame.grid_columnconfigure(4, weight=0, minsize=74)
+        frame.grid_columnconfigure(5, weight=0, minsize=62)
 
-        header = ctk.CTkFrame(frame, fg_color="transparent")
-        header.pack(fill="x", padx=10, pady=(8, 0))
+        identity = ctk.CTkFrame(frame, fg_color="transparent")
+        identity.grid(row=0, column=0, rowspan=2, sticky="nsew", padx=(10, 4), pady=6)
+        identity.grid_columnconfigure(0, weight=1)
 
-        symbol_label = self.create_card_label(header, symbol, 14, TEXT_COLOR, True)
-        symbol_label.pack(side="left", fill="x", expand=True)
+        symbol_label = self.create_card_label(identity, symbol, 14, TEXT_COLOR, True)
+        symbol_label.grid(row=0, column=0, sticky="ew")
+
+        market_label = self.create_card_label(identity, "USDT Perpetual", 10, MUTED_TEXT_COLOR, False)
+        market_label.grid(row=1, column=0, sticky="ew", pady=(0, 1))
 
         if editable:
             edit_button = ctk.CTkButton(
-                header,
+                identity,
                 text="✎",
                 width=28,
-                height=24,
+                height=22,
                 fg_color=PANEL_COLOR,
                 hover_color=BORDER_COLOR,
                 border_color=BORDER_COLOR,
@@ -827,22 +952,20 @@ class SmartTradeUI:
                 corner_radius=6,
                 command=lambda card_index=index: self.open_coin_selector(card_index)
             )
-            edit_button.pack(side="right")
+            edit_button.grid(row=0, column=1, rowspan=2, sticky="e", padx=(4, 0))
 
         labels = {
             "symbol": symbol_label,
-            "status": self.create_card_label(frame, "", 11, GRAY, True),
-            "setup": self.create_card_label(frame, "—", 13, MUTED_TEXT_COLOR, True),
-            "time": self.create_card_label(frame, "", 11, MUTED_TEXT_COLOR, False),
-            "age": self.create_card_label(frame, "", 11, MUTED_TEXT_COLOR, False),
-            "rsi": self.create_card_label(frame, "RSI —", 12, TEXT_COLOR, False)
+            "market": market_label,
+            "setup": self.create_card_value(frame, 1, "SETUP", "—", MUTED_TEXT_COLOR),
+            "quality": self.create_card_value(frame, 2, "QUALITY", "Q:—", TEXT_COLOR),
+            "age": self.create_card_value(frame, 4, "SIGNAL", "", MUTED_TEXT_COLOR),
+            "status": self.create_card_value(frame, 5, "STATUS", "", GRAY),
+            "time": None
         }
-
-        labels["status"].pack(fill="x", padx=10, pady=(1, 0))
-        labels["setup"].pack(fill="x", padx=10, pady=(1, 0))
-        labels["time"].pack(fill="x", padx=10)
-        labels["age"].pack(fill="x", padx=10)
-        labels["rsi"].pack(fill="x", padx=10, pady=(0, 8))
+        labels["rsi"] = self.create_card_value(frame, 3, "RSI", "—", TEXT_COLOR)
+        labels["rsi_cell"] = labels["rsi"].master
+        self.update_rsi_card_visibility(labels)
 
         self.bind_card_click(frame, symbol)
 
@@ -850,6 +973,31 @@ class SmartTradeUI:
         labels["symbol_value"] = symbol
 
         return labels
+
+    def create_card_value(self, parent, column, title, value, color):
+
+        cell = ctk.CTkFrame(parent, fg_color="transparent")
+        cell.grid(row=0, column=column, rowspan=2, sticky="nsew", padx=2, pady=6)
+        cell.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(
+            cell,
+            text=title,
+            font=("Arial", 8, "bold"),
+            text_color=GRAY,
+            anchor="w"
+        ).grid(row=0, column=0, sticky="ew")
+
+        value_label = ctk.CTkLabel(
+            cell,
+            text=value,
+            font=("Arial", 11, "bold"),
+            text_color=color,
+            anchor="w"
+        )
+        value_label.grid(row=1, column=0, sticky="ew", pady=(1, 0))
+
+        return value_label
 
     def create_card_label(self, parent, text, size, color, bold):
 
