@@ -743,3 +743,54 @@ Status: AGING
 Notification: OK
 
 ----------------------------------------
+[2026-07-08 12:43:11]
+
+ALERT
+
+ETHFIUSDT
+
+Bullish
+
+Quality: 66
+
+TF: 30m
+
+Status: ACTIVE
+
+Notification: OK
+
+----------------------------------------
+[2026-07-08 12:43:42]
+
+ALERT
+
+MNTUSDT
+
+Bullish
+
+Quality: 71
+
+TF: 30m
+
+Status: ACTIVE
+
+Notification: OK
+
+----------------------------------------
+[2026-07-08 12:44:09]
+
+ALERT
+
+DEXEUSDT
+
+Bullish
+
+Quality: 60
+
+TF: 30m
+
+Status: AGING
+
+Notification: OK
+
+----------------------------------------
