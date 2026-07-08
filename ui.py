@@ -256,7 +256,7 @@ class SmartTradeUI:
                 "scan_batch",
                 batch_started_at,
                 mode=scan_mode_label(self.scan_mode, self.top_bybit_limit),
-                symbols=len(batch_result["processed"]),
+                symbols=batch_result["scanned_count"],
                 errors=len(batch_result["errors"])
             )
 
