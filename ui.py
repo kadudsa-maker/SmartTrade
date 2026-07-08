@@ -8,6 +8,7 @@ from config import (
     ACTIVE_MAX_CANDLES,
     AGING_MAX_CANDLES,
     MIN_VISIBLE_QUALITY,
+    PERF_DEBUG,
     PIVOT_LEFT,
     PIVOT_RIGHT,
     SCAN_BATCH_SIZE,
@@ -132,6 +133,8 @@ class SmartTradeUI:
 
         self.refresh_index = 0
         self.last_top50_sort_at = 0
+        self.last_top50_order = []
+        self.scan_cycle_started_at = None
         self.scan_cycle_number = 0
         self.last_scan_batch_time = None
         self.last_full_scan_time = None
@@ -142,6 +145,22 @@ class SmartTradeUI:
         self.alert_settings_window = None
 
         self.build_ui()
+
+    def perf_log(self, label, started_at, **fields):
+
+        if not PERF_DEBUG:
+            return
+
+        elapsed_ms = (time.perf_counter() - started_at) * 1000
+        details = " ".join(
+            f"{key}={value}"
+            for key, value in fields.items()
+        )
+
+        if details:
+            print(f"PERF {label}: {elapsed_ms:.1f}ms {details}")
+        else:
+            print(f"PERF {label}: {elapsed_ms:.1f}ms")
 
     def select_timeframe(self, interval):
 
@@ -184,25 +203,43 @@ class SmartTradeUI:
         if self.selected_symbol is None:
             return
 
+        fetch_started_at = time.perf_counter()
         df = get_klines(
             self.selected_symbol,
             interval=self.selected_interval
         )
+        self.perf_log(
+            "chart_fetch",
+            fetch_started_at,
+            symbol=self.selected_symbol,
+            timeframe=self.selected_interval
+        )
         df.attrs["symbol"] = self.selected_symbol
         df.attrs["timeframe"] = self.selected_interval
 
+        chart_started_at = time.perf_counter()
         self.chart.set_candles(df)
+        self.perf_log(
+            "chart_set_candles",
+            chart_started_at,
+            symbol=self.selected_symbol,
+            timeframe=self.selected_interval
+        )
         self.update_open_chart_status(current_polish_time())
 
     def scan_one_coin(self):
 
         completed_cycle = False
+        batch_started_at = time.perf_counter()
 
         try:
             scan_symbols = self.get_scan_symbols()
 
             if not scan_symbols:
                 return
+
+            if self.scan_cycle_started_at is None:
+                self.scan_cycle_started_at = batch_started_at
 
             batch_result = run_scan_batch(
                 scan_symbols,
@@ -215,6 +252,13 @@ class SmartTradeUI:
             )
             self.refresh_index = batch_result["next_index"]
             completed_cycle = batch_result["completed_cycle"]
+            self.perf_log(
+                "scan_batch",
+                batch_started_at,
+                mode=scan_mode_label(self.scan_mode, self.top_bybit_limit),
+                symbols=len(batch_result["processed"]),
+                errors=len(batch_result["errors"])
+            )
 
             for symbol, error in batch_result["errors"]:
                 print(f"Scan symbol error: {symbol}: {error}")
@@ -235,6 +279,7 @@ class SmartTradeUI:
 
     def mark_scan_cycle_completed(self, symbol_count):
 
+        cycle_started_at = self.scan_cycle_started_at
         self.scan_cycle_number += 1
         self.last_full_scan_time = current_polish_time()
 
@@ -245,10 +290,20 @@ class SmartTradeUI:
             f"cycle={self.scan_cycle_number} "
             f"time={self.last_full_scan_time}"
         )
+        if cycle_started_at is not None:
+            self.perf_log(
+                "scan_cycle",
+                cycle_started_at,
+                mode=scan_mode_label(self.scan_mode, self.top_bybit_limit),
+                symbols=symbol_count,
+                cycle=self.scan_cycle_number
+            )
+        self.scan_cycle_started_at = None
 
     def reset_scan_cycle_state(self):
 
         self.scan_cycle_number = 0
+        self.scan_cycle_started_at = None
         self.last_scan_batch_time = None
         self.last_full_scan_time = None
 
@@ -384,18 +439,41 @@ class SmartTradeUI:
     def update_watchlist_coin(self, coin, index):
 
         symbol = coin["symbol"]
+        symbol_started_at = time.perf_counter()
+
+        fetch_started_at = time.perf_counter()
         df = get_klines(
             symbol,
             interval=self.selected_interval
         )
+        self.perf_log("fetch_klines", fetch_started_at, symbol=symbol)
         df.attrs["symbol"] = symbol
         df.attrs["timeframe"] = self.selected_interval
 
+        rsi_started_at = time.perf_counter()
         rsi = calculate_rsi(df)
+        self.perf_log("calculate_rsi", rsi_started_at, symbol=symbol)
+
+        candles_started_at = time.perf_counter()
         candles = self.prepare_engine_candles(df)
+        self.perf_log("prepare_candles", candles_started_at, symbol=symbol)
+
+        divergence_started_at = time.perf_counter()
         divergences = self.find_coin_divergences_from_candles(candles)
+        self.perf_log("find_divergences", divergence_started_at, symbol=symbol)
+
+        select_started_at = time.perf_counter()
         best_divergence = self.select_freshest_best_signal(divergences, len(candles))
+        self.perf_log("select_signal", select_started_at, symbol=symbol)
+
+        if PERF_DEBUG and best_divergence is not None:
+            quality_started_at = time.perf_counter()
+            calculate_quality_score(best_divergence.get("quality"))
+            self.perf_log("quality_score", quality_started_at, symbol=symbol)
+
+        alert_started_at = time.perf_counter()
         self.process_alert_candidate(symbol, best_divergence, len(candles))
+        self.perf_log("alert_candidate", alert_started_at, symbol=symbol)
 
         if self.is_top_bybit_mode():
             self.top50_results[symbol] = {
@@ -404,10 +482,16 @@ class SmartTradeUI:
                 "divergence": best_divergence,
                 "candle_count": len(candles)
             }
+            card_started_at = time.perf_counter()
             self.update_top50_result_card(symbol)
+            self.perf_log("update_card", card_started_at, symbol=symbol)
+            self.perf_log("scan_symbol", symbol_started_at, symbol=symbol)
             return
 
+        card_started_at = time.perf_counter()
         self.update_watchlist_card(index, symbol, rsi, best_divergence, len(candles))
+        self.perf_log("update_card", card_started_at, symbol=symbol)
+        self.perf_log("scan_symbol", symbol_started_at, symbol=symbol)
 
     def find_coin_divergences_from_candles(self, candles):
 
@@ -1225,6 +1309,7 @@ class SmartTradeUI:
         if not self.is_top_bybit_mode():
             return
 
+        sort_started_at = time.perf_counter()
         results = []
 
         for position, symbol in enumerate(self.top50_symbols):
@@ -1250,9 +1335,23 @@ class SmartTradeUI:
             reverse=True
         )
 
-        self.coins = [{"symbol": result["symbol"]} for result in sorted_results]
-        self.reorder_top50_cards(sorted_results)
+        sorted_symbols = [result["symbol"] for result in sorted_results]
+
+        current_order = [card["symbol_value"] for card in self.buttons]
+
+        if sorted_symbols != current_order:
+            self.coins = [{"symbol": symbol} for symbol in sorted_symbols]
+            self.reorder_top50_cards(sorted_results)
+
+        self.last_top50_order = sorted_symbols
+
         self.last_top50_sort_at = time.monotonic()
+        self.perf_log(
+            "sort_top_list",
+            sort_started_at,
+            mode=scan_mode_label(self.scan_mode, self.top_bybit_limit),
+            symbols=len(sorted_results)
+        )
 
     def sort_top50_cards_if_needed(self):
 

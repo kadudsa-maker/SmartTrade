@@ -42,6 +42,7 @@ class SmartTradeChart:
         self.rsi_pivot_highs = []
         self.rsi_pivot_lows = []
         self.regular_divergences = []
+        self._last_source_key = None
 
         self.canvas = tk.Canvas(
             self.frame,
@@ -69,6 +70,15 @@ class SmartTradeChart:
 
     def set_candles(self, df):
 
+        source_key = (
+            id(df),
+            df.attrs.get("symbol"),
+            df.attrs.get("timeframe")
+        )
+
+        if source_key == self._last_source_key:
+            return
+
         self.candles = self._prepare_candles(df)
         self.rsi_series = self._calculate_rsi(self.candles["close"])
         self.pivot_highs, self.pivot_lows = find_pivots(
@@ -92,10 +102,12 @@ class SmartTradeChart:
         )
 
         if self.candles.empty:
+            self._last_source_key = source_key
             return
 
         self._update_figure()
         self._draw()
+        self._last_source_key = source_key
 
     def _configure_figure(self):
 
