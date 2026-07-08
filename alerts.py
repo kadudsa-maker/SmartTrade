@@ -241,6 +241,9 @@ class AlertManager:
             return settings
 
         for key, value in data.items():
+            if key == "alerts_enabled":
+                continue
+
             if hasattr(settings, key):
                 setattr(settings, key, value)
 

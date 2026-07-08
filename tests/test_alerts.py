@@ -1,3 +1,5 @@
+import json
+
 from alerts import AlertLogWriter, AlertManager, WindowsAlertNotifier, build_signal_id
 from ui import clamp_alert_quality
 
@@ -457,6 +459,31 @@ def test_alert_log_rotates_above_max_size(tmp_path):
     assert old_log_path.exists()
     assert old_log_path.read_text(encoding="utf-8") == "x" * 20
     assert "FORCE TEST" in log_path.read_text(encoding="utf-8")
+
+
+def test_saved_alerts_enabled_does_not_enable_alerts_on_startup(tmp_path):
+
+    settings_path = tmp_path / "alert_settings.json"
+    settings_path.write_text(
+        json.dumps({
+            "alerts_enabled": True,
+            "minimum_quality": 72,
+            "scan_range": "top100"
+        }),
+        encoding="utf-8"
+    )
+
+    manager = AlertManager(
+        settings_path=settings_path,
+        notifier=FakeNotifier(),
+        log_writer=FakeLogWriter(),
+        default_timeframe="60",
+        default_scan_range="top100"
+    )
+
+    assert manager.settings.alerts_enabled is False
+    assert manager.settings.minimum_quality == 72
+    assert manager.settings.scan_range == "top100"
 
 
 def create_manager(tmp_path, notifier):

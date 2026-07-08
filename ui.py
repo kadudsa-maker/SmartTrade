@@ -87,6 +87,11 @@ RSI_SORT_LABELS = {
     RSI_SORT_MODE_RSI: "Sort: RSI",
     RSI_SORT_MODE_RSI_QUALITY: "Sort: RSI + Quality"
 }
+DEFAULT_SCAN_MODE = SCAN_MODE_TOP100
+DEFAULT_TOP_BYBIT_LIMIT = 100
+DEFAULT_TIMEFRAME = "60"
+DEFAULT_RSI_VIEW_OPTION = RSI_VIEW_ON
+DEFAULT_RSI_SORT_MODE = RSI_SORT_MODE_QUALITY
 
 
 class SmartTradeUI:
@@ -102,9 +107,9 @@ class SmartTradeUI:
         self.app.configure(fg_color=BG_COLOR)
 
         self.selected_symbol = None
-        self.selected_interval = "15"
-        self.scan_mode = SCAN_MODE_WATCHLIST
-        self.top_bybit_limit = 50
+        self.selected_interval = DEFAULT_TIMEFRAME
+        self.scan_mode = DEFAULT_SCAN_MODE
+        self.top_bybit_limit = DEFAULT_TOP_BYBIT_LIMIT
 
         self.watchlist_symbols = get_watchlist()
         self.top50_symbols = []
@@ -126,9 +131,9 @@ class SmartTradeUI:
         self.reset_watchlist_button = None
         self.alert_notification_status_label = None
         self.alert_sound_status_label = None
-        self.rsi_view_option = StringVar(value=RSI_VIEW_OFF)
+        self.rsi_view_option = StringVar(value=DEFAULT_RSI_VIEW_OPTION)
         self.rsi_view_menu = None
-        self.rsi_sort_mode = RSI_SORT_MODE_QUALITY
+        self.rsi_sort_mode = DEFAULT_RSI_SORT_MODE
         self.rsi_sort_mode_label = None
 
         self.refresh_index = 0
@@ -143,6 +148,9 @@ class SmartTradeUI:
             default_scan_range=self.get_alert_scan_range()
         )
         self.alert_settings_window = None
+
+        if self.is_top_bybit_mode():
+            self.load_top50_scan_symbols()
 
         self.build_ui()
 
@@ -924,10 +932,10 @@ class SmartTradeUI:
         except (TypeError, ValueError):
             return TEXT_COLOR
 
-        if value > 70:
+        if value >= 60:
             return RED
 
-        if value < 30:
+        if value <= 30:
             return GREEN
 
         return TEXT_COLOR

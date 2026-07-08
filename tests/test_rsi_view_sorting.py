@@ -1,5 +1,11 @@
 from ui import (
+    DEFAULT_RSI_SORT_MODE,
+    DEFAULT_RSI_VIEW_OPTION,
+    DEFAULT_SCAN_MODE,
+    DEFAULT_TIMEFRAME,
+    DEFAULT_TOP_BYBIT_LIMIT,
     GREEN,
+    SCAN_MODE_TOP100,
     RSI_SORT_MODE_QUALITY,
     RSI_SORT_MODE_RSI,
     RSI_SORT_MODE_RSI_QUALITY,
@@ -114,15 +120,25 @@ def test_rsi_extreme_score_is_distance_from_50():
     assert ui.rsi_extreme_score(80) > ui.rsi_extreme_score(60)
 
 
+def test_startup_defaults_use_top100_1h_rsi_on_quality_sort():
+
+    assert DEFAULT_SCAN_MODE == SCAN_MODE_TOP100
+    assert DEFAULT_TOP_BYBIT_LIMIT == 100
+    assert DEFAULT_TIMEFRAME == "60"
+    assert DEFAULT_RSI_VIEW_OPTION == RSI_VIEW_ON
+    assert DEFAULT_RSI_SORT_MODE == RSI_SORT_MODE_QUALITY
+
+
 def test_rsi_value_color_uses_extreme_thresholds():
 
     ui = _ui_with_rsi_mode()
 
-    assert ui.rsi_value_color(71) == RED
-    assert ui.rsi_value_color(29) == GREEN
-    assert ui.rsi_value_color(30) == TEXT_COLOR
-    assert ui.rsi_value_color(70) == TEXT_COLOR
-    assert ui.rsi_value_color(50) == TEXT_COLOR
+    assert ui.rsi_value_color(60) == RED
+    assert ui.rsi_value_color(70) == RED
+    assert ui.rsi_value_color(30) == GREEN
+    assert ui.rsi_value_color(25) == GREEN
+    assert ui.rsi_value_color(45) == TEXT_COLOR
+    assert ui.rsi_value_color(59.99) == TEXT_COLOR
 
 
 def test_rsi_on_shows_rsi_without_changing_sort_mode():
