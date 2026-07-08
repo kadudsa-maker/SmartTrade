@@ -1,3 +1,5 @@
+import ui as ui_module
+
 from ui import (
     DEFAULT_RSI_SORT_MODE,
     DEFAULT_RSI_VIEW_OPTION,
@@ -57,6 +59,30 @@ class FakeCell:
     def grid_remove(self):
         self.mapped = False
         self.grid_remove_calls += 1
+
+
+class FakeLabel:
+
+    def __init__(self):
+        self.options = {
+            "text": "",
+            "text_color": ""
+        }
+
+    def cget(self, option):
+        return self.options.get(option)
+
+    def configure(self, **options):
+        self.options.update(options)
+
+
+class FakeApp:
+
+    def __init__(self):
+        self.cancelled = []
+
+    def after_cancel(self, after_id):
+        self.cancelled.append(after_id)
 
 
 def _ui_with_rsi_mode(sort_mode=RSI_SORT_MODE_QUALITY, view_option=RSI_VIEW_OFF):
@@ -167,13 +193,13 @@ def test_rsi_off_hides_rsi_and_resets_rsi_sort_to_quality():
     assert rsi_cell.mapped is False
 
 
-def test_rsi_sort_keeps_fresh_signal_above_expired_extreme_rsi():
+def test_rsi_sort_prioritizes_extreme_rsi_over_freshness():
 
     ui = _ui_with_rsi_mode(RSI_SORT_MODE_RSI, RSI_VIEW_SORT)
     fresh_signal = _result(rsi=70, quality=65, age_candles=0)
     expired_extreme_signal = _result(rsi=95, quality=95, age_candles=50)
 
-    assert ui.get_signal_sort_key(fresh_signal) > ui.get_signal_sort_key(expired_extreme_signal)
+    assert ui.get_signal_sort_key(expired_extreme_signal) > ui.get_signal_sort_key(fresh_signal)
 
 
 def test_rsi_sort_uses_rsi_extreme_for_similar_freshness():
@@ -185,22 +211,22 @@ def test_rsi_sort_uses_rsi_extreme_for_similar_freshness():
     assert ui.get_signal_sort_key(more_extreme) > ui.get_signal_sort_key(less_extreme)
 
 
-def test_rsi_sort_prefers_one_candle_ago_over_three_candles_ago():
+def test_rsi_sort_extreme_rsi_beats_fresher_setup():
 
     ui = _ui_with_rsi_mode(RSI_SORT_MODE_RSI, RSI_VIEW_SORT)
     one_candle_ago = _result(rsi=60, quality=60, age_candles=1)
     three_candles_ago = _result(rsi=95, quality=95, age_candles=3)
 
-    assert ui.get_signal_sort_key(one_candle_ago) > ui.get_signal_sort_key(three_candles_ago)
+    assert ui.get_signal_sort_key(three_candles_ago) > ui.get_signal_sort_key(one_candle_ago)
 
 
-def test_rsi_sort_prefers_two_candles_ago_over_older_setup():
+def test_rsi_sort_old_extreme_setup_can_rank_above_fresher_setup():
 
     ui = _ui_with_rsi_mode(RSI_SORT_MODE_RSI, RSI_VIEW_SORT)
     two_candles_ago = _result(rsi=60, quality=60, age_candles=2)
     older_setup = _result(rsi=95, quality=95, age_candles=5)
 
-    assert ui.get_signal_sort_key(two_candles_ago) > ui.get_signal_sort_key(older_setup)
+    assert ui.get_signal_sort_key(older_setup) > ui.get_signal_sort_key(two_candles_ago)
 
 
 def test_rsi_sort_for_old_setups_prioritizes_rsi_extreme_over_age():
@@ -215,13 +241,22 @@ def test_rsi_sort_for_old_setups_prioritizes_rsi_extreme_over_age():
     )
 
 
-def test_rsi_sort_does_not_use_quality_as_criterion():
+def test_rsi_sort_uses_quality_as_tie_breaker():
 
     ui = _ui_with_rsi_mode(RSI_SORT_MODE_RSI, RSI_VIEW_SORT)
     lower_quality = _result(rsi=80, quality=70, age_candles=2)
     higher_quality = _result(rsi=80, quality=95, age_candles=2)
 
-    assert ui.get_signal_sort_key(lower_quality) == ui.get_signal_sort_key(higher_quality)
+    assert ui.get_signal_sort_key(higher_quality) > ui.get_signal_sort_key(lower_quality)
+
+
+def test_rsi_sort_uses_age_after_rsi_and_quality_ties():
+
+    ui = _ui_with_rsi_mode(RSI_SORT_MODE_RSI, RSI_VIEW_SORT)
+    fresher = _result(rsi=80, quality=80, age_candles=3)
+    older = _result(rsi=80, quality=80, age_candles=50)
+
+    assert ui.get_signal_sort_key(fresher) > ui.get_signal_sort_key(older)
 
 
 def test_rsi_quality_sort_uses_freshness_before_quality_priority():
@@ -268,6 +303,150 @@ def test_rsi_sort_does_not_change_quality_or_rsi():
 
     assert result["divergence"]["quality"] == quality_before
     assert result["rsi"] == rsi_before
+
+
+def test_scan_restart_resets_scan_state_without_changing_user_modes():
+
+    ui = SmartTradeUI.__new__(SmartTradeUI)
+    alert_manager = FakeAlertManager()
+    started = []
+    rebuilt = []
+
+    ui.app = FakeApp()
+    ui.scan_after_id = "scan-after-1"
+    ui.refresh_index = 7
+    ui.top50_results = {"BTCUSDT": {"symbol": "BTCUSDT"}}
+    ui.last_top50_sort_at = 123
+    ui.last_top50_order = ["BTCUSDT"]
+    ui.scan_cycle_number = 3
+    ui.scan_cycle_started_at = 10
+    ui.last_scan_batch_time = "old batch"
+    ui.last_full_scan_time = "old full"
+    ui.last_card_texts = {"BTCUSDT": "old"}
+    ui.scan_mode = "top100"
+    ui.top_bybit_limit = 100
+    ui.selected_interval = "60"
+    ui.rsi_sort_mode = RSI_SORT_MODE_RSI
+    ui.rsi_view_option = Flag(RSI_VIEW_SORT)
+    ui.alert_manager = alert_manager
+    ui.top50_symbols = ["BTCUSDT", "ETHUSDT"]
+    ui.coins = [{"symbol": "OLDUSDT"}]
+    ui.scan_status_label = FakeLabel()
+    ui.build_watchlist_cards = lambda: rebuilt.append(True)
+    ui.scan_one_coin = lambda: started.append(True)
+    ui.prepare_scan_queue_for_restart = lambda: (
+        setattr(ui, "coins", [{"symbol": "BTCUSDT"}, {"symbol": "ETHUSDT"}])
+        or True
+    )
+
+    ui.scan_now()
+
+    assert ui.app.cancelled == ["scan-after-1"]
+    assert ui.scan_after_id is None
+    assert ui.refresh_index == 0
+    assert ui.top50_results == {}
+    assert ui.last_top50_order == []
+    assert ui.scan_cycle_number == 0
+    assert ui.scan_cycle_started_at is None
+    assert ui.last_scan_batch_time is None
+    assert ui.last_full_scan_time is None
+    assert ui.last_card_texts == {}
+    assert ui.coins == [{"symbol": "BTCUSDT"}, {"symbol": "ETHUSDT"}]
+    assert rebuilt == [True]
+    assert started == [True]
+    assert ui.selected_interval == "60"
+    assert ui.rsi_sort_mode == RSI_SORT_MODE_RSI
+    assert ui.current_rsi_view_option() == RSI_VIEW_SORT
+    assert ui.alert_manager is alert_manager
+
+
+def test_restart_scan_uses_scan_button_flow():
+
+    ui = SmartTradeUI.__new__(SmartTradeUI)
+    called = []
+    ui.scan_now = lambda: called.append(True)
+
+    ui.restart_scan()
+
+    assert called == [True]
+
+
+def test_scan_now_does_not_clear_existing_cards_when_symbol_fetch_fails():
+
+    ui = SmartTradeUI.__new__(SmartTradeUI)
+    ui.scan_status_label = FakeLabel()
+    ui.scan_after_id = "scan-after-1"
+    ui.refresh_index = 8
+    ui.top50_results = {"BTCUSDT": {"symbol": "BTCUSDT"}}
+    ui.coins = [{"symbol": "BTCUSDT"}]
+    ui.buttons = [{"frame": object()}]
+    ui.cards_by_symbol = {"BTCUSDT": object()}
+    ui.prepare_scan_queue_for_restart = lambda: False
+    ui.cancel_scan_loop = lambda: (_ for _ in ()).throw(AssertionError("cancel should not run"))
+    ui.clear_watchlist_cards = lambda: (_ for _ in ()).throw(AssertionError("clear should not run"))
+    ui.build_watchlist_cards = lambda: (_ for _ in ()).throw(AssertionError("build should not run"))
+    ui.scan_one_coin = lambda: (_ for _ in ()).throw(AssertionError("scan should not run"))
+
+    ui.scan_now()
+
+    assert ui.refresh_index == 8
+    assert ui.top50_results == {"BTCUSDT": {"symbol": "BTCUSDT"}}
+    assert ui.coins == [{"symbol": "BTCUSDT"}]
+    assert ui.buttons == [{"frame": ui.buttons[0]["frame"]}]
+
+
+def test_prepare_scan_queue_shows_bybit_error_when_symbol_fetch_raises(monkeypatch):
+
+    ui = SmartTradeUI.__new__(SmartTradeUI)
+    errors = []
+    ui.scan_mode = "top100"
+    ui.top_bybit_limit = 100
+    ui.scan_status_label = FakeLabel()
+
+    monkeypatch.setattr(
+        ui_module,
+        "get_top_bybit_symbols",
+        lambda _limit: (_ for _ in ()).throw(RuntimeError("SSL failed"))
+    )
+    monkeypatch.setattr(
+        ui_module.messagebox,
+        "showerror",
+        lambda _title, message: errors.append(message)
+    )
+
+    assert ui.prepare_scan_queue_for_restart() is False
+    assert "SSL failed" in errors[0]
+    assert ui.scan_status_label.cget("text") == "Bybit connection error"
+    assert ui.scan_status_label.cget("text_color") == RED
+
+
+def test_prepare_scan_queue_accepts_valid_top_symbols(monkeypatch):
+
+    ui = SmartTradeUI.__new__(SmartTradeUI)
+    ui.scan_mode = "top100"
+    ui.top_bybit_limit = 100
+    ui.scan_status_label = FakeLabel()
+
+    monkeypatch.setattr(
+        ui_module,
+        "get_top_bybit_symbols",
+        lambda _limit: ["BTCUSDT", "ETHUSDT"]
+    )
+
+    assert ui.prepare_scan_queue_for_restart() is True
+    assert ui.top50_symbols == ["BTCUSDT", "ETHUSDT"]
+    assert ui.coins == [{"symbol": "BTCUSDT"}, {"symbol": "ETHUSDT"}]
+
+
+def test_scan_progress_label_shows_current_position_count():
+
+    ui = SmartTradeUI.__new__(SmartTradeUI)
+    ui.scan_progress_label = FakeLabel()
+
+    ui.update_scan_progress("ETHUSDT", 4, 100)
+
+    assert ui.scan_progress_label.cget("text") == "5/100"
+    assert ui.scan_progress_label.cget("text_color") == GREEN
 
 
 def test_rsi_on_does_not_change_sort_mode():

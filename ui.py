@@ -24,6 +24,7 @@ from market import (
     get_all_bybit_symbols,
     get_klines,
     get_top_bybit_symbols,
+    get_top_bybit_last_error,
     get_watchlist,
     reset_watchlist,
     save_watchlist
@@ -125,12 +126,14 @@ class SmartTradeUI:
         self.top_time_label = None
         self.top_timeframe_label = None
         self.open_chart_label = None
-        self.chart_refreshed_label = None
         self.watchlist_scroll = None
         self.watchlist_title_label = None
         self.reset_watchlist_button = None
         self.alert_notification_status_label = None
         self.alert_sound_status_label = None
+        self.scan_button = None
+        self.scan_status_label = None
+        self.scan_progress_label = None
         self.rsi_view_option = StringVar(value=DEFAULT_RSI_VIEW_OPTION)
         self.rsi_view_menu = None
         self.rsi_sort_mode = DEFAULT_RSI_SORT_MODE
@@ -143,6 +146,7 @@ class SmartTradeUI:
         self.scan_cycle_number = 0
         self.last_scan_batch_time = None
         self.last_full_scan_time = None
+        self.scan_after_id = None
         self.alert_manager = AlertManager(
             default_timeframe=self.selected_interval,
             default_scan_range=self.get_alert_scan_range()
@@ -253,9 +257,10 @@ class SmartTradeUI:
                 scan_symbols,
                 self.refresh_index,
                 self.get_scan_batch_size(),
-                lambda symbol, index: self.update_watchlist_coin(
-                    {"symbol": symbol},
-                    index
+                lambda symbol, index: self.scan_symbol_with_progress(
+                    symbol,
+                    index,
+                    len(scan_symbols)
                 )
             )
             self.refresh_index = batch_result["next_index"]
@@ -283,7 +288,151 @@ class SmartTradeUI:
             print(f"Scanner loop error: {error}")
 
         finally:
-            self.app.after(SCAN_INTERVAL_MS, self.scan_one_coin)
+            self.schedule_scan_loop()
+
+    def scan_symbol_with_progress(self, symbol, index, total_symbols):
+
+        self.update_scan_progress(symbol, index, total_symbols)
+        self.update_watchlist_coin(
+            {"symbol": symbol},
+            index
+        )
+
+    def schedule_scan_loop(self):
+
+        self.scan_after_id = self.app.after(SCAN_INTERVAL_MS, self.scan_one_coin)
+
+    def cancel_scan_loop(self):
+
+        scan_after_id = getattr(self, "scan_after_id", None)
+
+        if scan_after_id is None:
+            return
+
+        try:
+            self.app.after_cancel(scan_after_id)
+        except Exception:
+            pass
+
+        self.scan_after_id = None
+
+    def restart_scan(self):
+
+        self.scan_now()
+
+    def scan_now(self):
+
+        self.update_scan_status("SCAN: pobieram Bybit...", MUTED_TEXT_COLOR)
+        prepared = self.prepare_scan_queue_for_restart()
+
+        if not prepared:
+            return
+
+        self.cancel_scan_loop()
+        self.reset_scan_state_for_new_run()
+        self.clear_watchlist_cards()
+        self.build_watchlist_cards()
+        self.update_scan_status("SCAN: start", GREEN)
+        self.update_scan_progress(None, 0, len(self.get_scan_symbols()))
+        self.scan_one_coin()
+
+    def reset_scan_state_for_new_run(self):
+
+        self.refresh_index = 0
+        self.top50_results = {}
+        self.last_top50_sort_at = time.monotonic()
+        self.last_top50_order = []
+        self.reset_scan_cycle_state()
+        self.last_card_texts = {}
+
+    def reload_scan_queue(self):
+
+        if self.scan_mode == SCAN_MODE_WATCHLIST:
+            self.watchlist_symbols = get_watchlist()
+            self.coins = [{"symbol": symbol} for symbol in self.watchlist_symbols]
+            return
+
+        self.load_top50_scan_symbols()
+
+    def prepare_scan_queue_for_restart(self):
+
+        try:
+            if self.scan_mode == SCAN_MODE_WATCHLIST:
+                symbols = get_watchlist()
+
+                if not symbols:
+                    self.show_scan_connection_error("Watchlist jest pusta.")
+                    return False
+
+                self.watchlist_symbols = symbols
+                self.coins = [{"symbol": symbol} for symbol in symbols]
+                return True
+
+            symbols = get_top_bybit_symbols(self.top_bybit_limit)
+
+        except Exception as error:
+            self.show_scan_connection_error(
+                f"Nie można pobrać Top {self.top_bybit_limit} Bybit: {error}"
+            )
+            return False
+
+        if not symbols:
+            last_error = get_top_bybit_last_error()
+            if last_error is not None:
+                self.show_scan_connection_error(
+                    f"Nie można pobrać Top {self.top_bybit_limit} Bybit: {last_error}"
+                )
+            else:
+                self.show_scan_connection_error(
+                    f"Bybit nie zwrócił symboli Top {self.top_bybit_limit}."
+                )
+            return False
+
+        self.top50_symbols = symbols
+        self.coins = [{"symbol": symbol} for symbol in symbols]
+        return True
+
+    def show_scan_connection_error(self, message):
+
+        print(f"Bybit connection error: {message}")
+        self.update_scan_status("Bybit connection error", RED)
+        messagebox.showerror("SmartTrade", message)
+
+    def update_scan_status(self, text, color=MUTED_TEXT_COLOR):
+
+        if self.scan_status_label is None:
+            return
+
+        self.configure_label_if_changed(
+            self.scan_status_label,
+            text=text,
+            text_color=color
+        )
+
+    def update_scan_progress(self, symbol, index, total_symbols):
+
+        if getattr(self, "scan_progress_label", None) is None:
+            return
+
+        if not symbol or total_symbols <= 0:
+            text = "0/0"
+        else:
+            text = f"{index + 1}/{total_symbols}"
+
+        self.configure_label_if_changed(
+            self.scan_progress_label,
+            text=text,
+            text_color=GREEN
+        )
+
+    def clear_watchlist_cards(self):
+
+        for card in getattr(self, "buttons", []):
+            card["frame"].destroy()
+
+        self.buttons = []
+        self.cards_by_symbol = {}
+        self.last_card_texts = {}
 
     def mark_scan_cycle_completed(self, symbol_count):
 
@@ -631,25 +780,11 @@ class SmartTradeUI:
         if getattr(self, "rsi_sort_mode", RSI_SORT_MODE_QUALITY) == RSI_SORT_MODE_RSI_QUALITY:
             return self.rsi_quality_sort_key(status, age, rsi_extreme, quality_score)
 
-        return self.rsi_sort_key(status, age, rsi_extreme)
+        return self.rsi_sort_key(age, rsi_extreme, quality_score)
 
-    def rsi_sort_key(self, status, age, rsi_extreme):
+    def rsi_sort_key(self, age, rsi_extreme, quality_score):
 
-        is_fresh = self.is_fresh_rsi_setup(age)
-
-        if is_fresh:
-            primary = -age
-            secondary = rsi_extreme
-        else:
-            primary = rsi_extreme
-            secondary = -age
-
-        return (
-            self.rsi_status_priority(status),
-            1 if is_fresh else 0,
-            primary,
-            secondary
-        )
+        return rsi_extreme, quality_score, -age
 
     def rsi_quality_sort_key(self, status, age, rsi_extreme, quality_score):
 
@@ -1520,21 +1655,6 @@ class SmartTradeUI:
         )
         self.open_chart_label.pack(side="left", padx=(0, 10))
 
-        ctk.CTkLabel(
-            top_bar,
-            text="|",
-            font=("Arial", 13, "bold"),
-            text_color=GRAY
-        ).pack(side="left", padx=(0, 10))
-
-        self.chart_refreshed_label = ctk.CTkLabel(
-            top_bar,
-            text="Wykres odświeżony: —",
-            font=("Arial", 13, "bold"),
-            text_color=MUTED_TEXT_COLOR
-        )
-        self.chart_refreshed_label.pack(side="left", padx=(0, 14))
-
         self.alerts_button = ctk.CTkButton(
             top_bar,
             text="🔔 Alerts",
@@ -1549,6 +1669,37 @@ class SmartTradeUI:
             command=self.open_alert_settings
         )
         self.alerts_button.pack(side="right", padx=(0, 14))
+
+        self.scan_button = ctk.CTkButton(
+            top_bar,
+            text="SCAN",
+            width=78,
+            height=28,
+            fg_color=PANEL_COLOR,
+            hover_color=BORDER_COLOR,
+            border_color=BORDER_COLOR,
+            border_width=1,
+            text_color=TEXT_COLOR,
+            corner_radius=8,
+            command=self.scan_now
+        )
+        self.scan_button.pack(side="right", padx=(0, 8))
+
+        self.scan_progress_label = ctk.CTkLabel(
+            top_bar,
+            text="0/0",
+            font=("Arial", 12, "bold"),
+            text_color=GREEN
+        )
+        self.scan_progress_label.pack(side="right", padx=(0, 8))
+
+        self.scan_status_label = ctk.CTkLabel(
+            top_bar,
+            text="SCAN ready",
+            font=("Arial", 12, "bold"),
+            text_color=MUTED_TEXT_COLOR
+        )
+        self.scan_status_label.pack(side="right", padx=(0, 10))
 
         self.rsi_view_menu = ctk.CTkOptionMenu(
             top_bar,
@@ -1593,12 +1744,6 @@ class SmartTradeUI:
             self.configure_label_if_changed(
                 self.open_chart_label,
                 text=f"Otwarty: {self.selected_symbol or '—'}"
-            )
-
-        if self.chart_refreshed_label is not None:
-            self.configure_label_if_changed(
-                self.chart_refreshed_label,
-                text=f"Wykres odświeżony: {refreshed_at}"
             )
 
     def interval_label(self, interval):

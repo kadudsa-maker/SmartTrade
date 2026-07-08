@@ -22,6 +22,7 @@ WATCHLIST_PATH = Path("data/watchlist.json")
 # CACHE
 cache = {}
 top_bybit_cache = {}
+top_bybit_last_error = None
 all_bybit_symbols_cache = {
     "time": 0,
     "symbols": []
@@ -30,6 +31,8 @@ all_bybit_symbols_cache = {
 
 def get_top_bybit_symbols(limit=50):
     """Return top Bybit USDT linear symbols by 24h turnover, cached per limit."""
+
+    global top_bybit_last_error
 
     cached = top_bybit_cache.get(limit)
 
@@ -59,15 +62,22 @@ def get_top_bybit_symbols(limit=50):
         symbols = [ticker["symbol"] for ticker in sorted_tickers[:limit]]
 
     except Exception as error:
+        top_bybit_last_error = error
         print(f"Nie udało się pobrać Top {limit} Bybit: {error}")
         return []
 
+    top_bybit_last_error = None
     top_bybit_cache[limit] = {
         "time": time.time(),
         "symbols": symbols
     }
 
     return symbols
+
+
+def get_top_bybit_last_error():
+
+    return top_bybit_last_error
 
 
 def get_top20_usdt_perpetual_symbols(limit=DEFAULT_WATCHLIST_LIMIT):
