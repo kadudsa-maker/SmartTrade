@@ -83,11 +83,6 @@ RSI_VIEW_QUALITY_SORT = "RSI + Quality Sort"
 RSI_SORT_MODE_QUALITY = "quality"
 RSI_SORT_MODE_RSI = "rsi"
 RSI_SORT_MODE_RSI_QUALITY = "rsi_quality"
-RSI_SORT_LABELS = {
-    RSI_SORT_MODE_QUALITY: "Sort: Quality",
-    RSI_SORT_MODE_RSI: "Sort: RSI",
-    RSI_SORT_MODE_RSI_QUALITY: "Sort: RSI + Quality"
-}
 DEFAULT_SCAN_MODE = SCAN_MODE_TOP100
 DEFAULT_TOP_BYBIT_LIMIT = 100
 DEFAULT_TIMEFRAME = "60"
@@ -868,7 +863,7 @@ class SmartTradeUI:
 
         self.configure_label_if_changed(
             self.rsi_sort_mode_label,
-            text=RSI_SORT_LABELS.get(self.rsi_sort_mode, "Sort: Quality")
+            text="RSI Sort"
         )
 
     def refresh_rsi_view(self):
@@ -929,6 +924,7 @@ class SmartTradeUI:
             "setup": setup_text,
             "setup_color": setup_color,
             "quality": quality_text,
+            "quality_color": self.signal_quality_color(divergence),
             "time": signal_time,
             "age": age_text,
             "rsi": rsi_text,
@@ -957,7 +953,7 @@ class SmartTradeUI:
             card,
             "quality",
             text=quality_text,
-            text_color=TEXT_COLOR
+            text_color=card_text["quality_color"]
         )
         self.configure_card_label_if_present(card, "time", text=signal_time)
         self.configure_label_if_changed(card["age"], text=age_text)
@@ -1050,6 +1046,18 @@ class SmartTradeUI:
         quality_score = calculate_quality_score(divergence.get("quality"))
 
         return f"Q:{quality_score}"
+
+    def signal_quality_color(self, divergence):
+
+        if divergence is None:
+            return TEXT_COLOR
+
+        quality_score = calculate_quality_score(divergence.get("quality"))
+
+        if quality_score >= 60:
+            return GREEN
+
+        return TEXT_COLOR
 
     def format_rsi_text(self, rsi):
 
@@ -1723,20 +1731,13 @@ class SmartTradeUI:
         )
         self.rsi_view_menu.pack(side="right", padx=(0, 10))
 
-        ctk.CTkLabel(
-            top_bar,
-            text="RSI View",
-            font=("Arial", 12, "bold"),
-            text_color=MUTED_TEXT_COLOR
-        ).pack(side="right", padx=(0, 8))
-
         self.rsi_sort_mode_label = ctk.CTkLabel(
             top_bar,
-            text=RSI_SORT_LABELS[RSI_SORT_MODE_QUALITY],
+            text="RSI Sort",
             font=("Arial", 12, "bold"),
-            text_color=TEXT_COLOR
+            text_color=MUTED_TEXT_COLOR
         )
-        self.rsi_sort_mode_label.pack(side="right", padx=(0, 12))
+        self.rsi_sort_mode_label.pack(side="right", padx=(0, 8))
 
     def update_open_chart_status(self, refreshed_at):
 
