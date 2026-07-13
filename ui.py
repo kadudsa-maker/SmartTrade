@@ -1,4 +1,6 @@
 import customtkinter as ctk
+from queue import Empty, Queue
+import threading
 import time
 from tkinter import BooleanVar, StringVar, messagebox
 
@@ -32,7 +34,7 @@ from market import (
 )
 from pivots import find_pivots, find_rsi_pivots
 from rsi import calculate_rsi_series
-from scanner_state import run_scan_batch, scan_mode_label
+from scanner_state import next_scan_index, scan_mode_label
 from signal_quality import calculate_quality_score
 from strings import (
     ALERTS_BUTTON,
@@ -104,6 +106,7 @@ TOP_BYBIT_MODES_BY_LIMIT = {
     100: SCAN_MODE_TOP100,
     200: SCAN_MODE_TOP200
 }
+SCAN_RESULT_POLL_MS = 15
 ALERT_SCAN_RANGES = [
     (SCAN_MODE_WATCHLIST, "Watchlist"),
     (SCAN_MODE_TOP50, "Top 50"),
@@ -178,6 +181,21 @@ class SmartTradeUI:
         self.last_scan_batch_time = None
         self.last_full_scan_time = None
         self.scan_after_id = None
+        self.scan_result_after_id = None
+        self.scan_batch_position = 0
+        self.scan_generation = 0
+        self.current_scan_id = 0
+        self.current_scan_symbols = []
+        self.current_scan_results = {}
+        self.current_scan_rendered = 0
+        self.scan_cycle_alert_sent_count = 0
+        self.scan_job_sequence = 0
+        self.active_scan_job_id = None
+        self.scan_worker_busy = False
+        self.ui_thread_id = threading.get_ident()
+        self.max_scan_ui_callback_ms = 0
+        self.initialize_scan_worker()
+        self.app.protocol("WM_DELETE_WINDOW", self.shutdown_app)
         self.alert_manager = AlertManager(
             default_timeframe=self.selected_interval,
             default_scan_range=self.get_alert_scan_range()
@@ -211,6 +229,7 @@ class SmartTradeUI:
 
     def select_timeframe(self, interval):
 
+        self.cancel_scan_loop()
         self.selected_interval = interval
         self.refresh_index = 0
         self.top50_results = {}
@@ -222,6 +241,8 @@ class SmartTradeUI:
 
         self.update_timeframe_buttons()
         self.refresh_selected()
+        self.begin_scan_generation()
+        self.schedule_scan_loop(0)
 
     def update_timeframe_buttons(self):
 
@@ -274,68 +295,311 @@ class SmartTradeUI:
         )
         self.update_open_chart_status(current_polish_time())
 
-    def scan_one_coin(self):
+    def initialize_scan_worker(self):
 
-        completed_cycle = False
-        batch_started_at = time.perf_counter()
+        self.shutdown_requested = False
+        self.scan_result_queue = Queue()
+        self.scan_job_lock = threading.Lock()
+        self.scan_job_event = threading.Event()
+        self.scan_shutdown_event = threading.Event()
+        self.pending_scan_job = None
+        self.scan_worker_thread = threading.Thread(
+            target=self.scan_worker_loop,
+            name="SmartTradeScanner",
+            daemon=True
+        )
+        self.scan_worker_thread.start()
 
-        try:
-            scan_symbols = self.get_scan_symbols()
+    def scan_worker_loop(self):
 
-            if not scan_symbols:
+        while not self.scan_shutdown_event.is_set():
+            self.scan_job_event.wait()
+
+            if self.scan_shutdown_event.is_set():
+                break
+
+            with self.scan_job_lock:
+                job = self.pending_scan_job
+                self.pending_scan_job = None
+                self.scan_job_event.clear()
+
+            if job is None:
+                continue
+
+            try:
+                result = self.update_watchlist_coin(
+                    {"symbol": job["symbol"]},
+                    job["index"],
+                    scan_id=job["scan_id"],
+                    interval=job["interval"],
+                    total_symbols=job["total_symbols"],
+                    job_id=job["job_id"],
+                    scan_range=job["scan_range"]
+                )
+            except Exception as error:
+                result = self.create_scan_result_record(
+                    job["scan_id"],
+                    job["symbol"],
+                    job["index"],
+                    "error",
+                    interval=job["interval"],
+                    total_symbols=job["total_symbols"],
+                    job_id=job["job_id"],
+                    scan_range=job["scan_range"]
+                )
+                result["error"] = f"{type(error).__name__}: {error}"
+
+            if not self.scan_shutdown_event.is_set():
+                self.scan_result_queue.put(result)
+
+    def begin_scan_generation(self, symbols=None):
+
+        self.scan_generation += 1
+        self.current_scan_id = self.scan_generation
+        self.current_scan_symbols = list(
+            self.get_scan_symbols() if symbols is None else symbols
+        )
+        self.current_scan_results = {}
+        self.current_scan_rendered = 0
+        self.scan_cycle_alert_sent_count = 0
+        self.clear_scan_result_queue()
+        return self.current_scan_id
+
+    def clear_scan_result_queue(self):
+
+        while True:
+            try:
+                result = self.scan_result_queue.get_nowait()
+            except Empty:
                 return
 
-            if self.scan_cycle_started_at is None:
-                self.scan_cycle_started_at = batch_started_at
+            if result.get("job_id") == self.active_scan_job_id:
+                self.active_scan_job_id = None
+                self.scan_worker_busy = False
 
-            batch_result = run_scan_batch(
-                scan_symbols,
-                self.refresh_index,
-                self.get_scan_batch_size(),
-                lambda symbol, index: self.scan_symbol_with_progress(
-                    symbol,
-                    index,
-                    len(scan_symbols)
-                )
-            )
-            self.refresh_index = batch_result["next_index"]
-            completed_cycle = batch_result["completed_cycle"]
-            self.perf_log(
-                "scan_batch",
-                batch_started_at,
-                mode=scan_mode_label(self.scan_mode, self.top_bybit_limit),
-                symbols=batch_result["scanned_count"],
-                errors=len(batch_result["errors"])
-            )
+    def create_scan_result_record(
+        self,
+        scan_id,
+        symbol,
+        index,
+        status,
+        *,
+        interval=None,
+        total_symbols=0,
+        job_id=None,
+        scan_range=None
+    ):
 
-            for symbol, error in batch_result["errors"]:
-                print(f"Scan symbol error: {symbol}: {error}")
+        return {
+            "scan_id": scan_id,
+            "job_id": job_id,
+            "symbol": symbol,
+            "interval": interval,
+            "index": index,
+            "total_symbols": total_symbols,
+            "status": status,
+            "rsi": None,
+            "divergence": None,
+            "candle_count": 0,
+            "quality": None,
+            "candles_ago": None,
+            "signal_status": "",
+            "alert_candidate": None,
+            "scan_range": scan_range,
+            "ui_visible": False,
+            "error": None,
+            "worker_duration_ms": 0
+        }
 
-            self.last_scan_batch_time = current_polish_time()
+    def scan_one_coin(self):
 
-            if self.is_top_bybit_mode():
-                self.sort_top50_cards_if_needed()
+        self.scan_after_id = None
 
-            if completed_cycle:
-                self.mark_scan_cycle_completed(len(scan_symbols))
+        if self.shutdown_requested or self.scan_worker_busy:
+            return
 
-        except Exception as error:
-            print(f"Scanner loop error: {error}")
+        if not self.current_scan_symbols:
+            self.begin_scan_generation()
 
-        finally:
-            self.schedule_scan_loop()
+        if not self.current_scan_symbols:
+            return
+
+        if self.refresh_index >= len(self.current_scan_symbols):
+            self.refresh_index = 0
+
+        if self.scan_cycle_started_at is None:
+            self.scan_cycle_started_at = time.perf_counter()
+
+        symbol = self.current_scan_symbols[self.refresh_index]
+        self.scan_symbol_with_progress(
+            symbol,
+            self.refresh_index,
+            len(self.current_scan_symbols)
+        )
 
     def scan_symbol_with_progress(self, symbol, index, total_symbols):
 
+        if self.shutdown_requested or self.scan_worker_busy:
+            return False
+
         self.update_scan_progress(symbol, index, total_symbols)
-        self.update_watchlist_coin(
-            {"symbol": symbol},
-            index
+        self.scan_job_sequence += 1
+        job = {
+            "scan_id": self.current_scan_id,
+            "job_id": self.scan_job_sequence,
+            "symbol": symbol,
+            "interval": self.selected_interval,
+            "index": index,
+            "total_symbols": total_symbols,
+            "scan_range": self.get_alert_scan_range()
+        }
+
+        with self.scan_job_lock:
+            if self.pending_scan_job is not None:
+                return False
+            self.pending_scan_job = job
+            self.active_scan_job_id = job["job_id"]
+            self.scan_worker_busy = True
+            self.scan_job_event.set()
+
+        return True
+
+    def process_scan_results(self):
+
+        self.scan_result_after_id = None
+
+        if self.shutdown_requested:
+            return
+
+        callback_started_at = time.perf_counter()
+        try:
+            while True:
+                try:
+                    result = self.scan_result_queue.get_nowait()
+                except Empty:
+                    break
+                self.apply_scan_result(result)
+        finally:
+            callback_ms = (time.perf_counter() - callback_started_at) * 1000
+            self.max_scan_ui_callback_ms = max(self.max_scan_ui_callback_ms, callback_ms)
+            self.schedule_scan_result_poll()
+
+    def apply_scan_result(self, result):
+
+        if threading.get_ident() != self.ui_thread_id:
+            raise RuntimeError("Scan results must be applied on the Tk main thread.")
+
+        if self.shutdown_requested:
+            return False
+
+        is_active_job = result.get("job_id") == self.active_scan_job_id
+        if is_active_job:
+            self.active_scan_job_id = None
+            self.scan_worker_busy = False
+
+        if result.get("scan_id") != self.current_scan_id:
+            if is_active_job:
+                self.schedule_scan_loop(0)
+            return False
+
+        callback_started_at = time.perf_counter()
+        symbol = result["symbol"]
+        index = result["index"]
+        if not hasattr(self, "current_scan_results"):
+            self.current_scan_results = {}
+        if not hasattr(self, "current_scan_rendered"):
+            self.current_scan_rendered = 0
+        self.current_scan_results[symbol] = result
+        self.current_scan_rendered += 1
+
+        if result["status"] == "error":
+            print(f"Scan symbol error: {symbol}: {result['error']}")
+        else:
+            ui_ready = False
+            if self.is_top_bybit_mode():
+                self.top50_results[symbol] = {
+                    "symbol": symbol,
+                    "rsi": result["rsi"],
+                    "divergence": result["divergence"],
+                    "candle_count": result["candle_count"]
+                }
+                ui_ready = self.update_top50_result_card(symbol)
+            elif index < len(self.buttons):
+                ui_ready = self.update_watchlist_card(
+                    index,
+                    symbol,
+                    result["rsi"],
+                    result["divergence"],
+                    result["candle_count"]
+                )
+
+            self.process_alert_candidate(
+                symbol,
+                result["alert_candidate"],
+                result["candle_count"],
+                ui_ready=ui_ready,
+                interval=result["interval"],
+                scan_range=result["scan_range"]
+            )
+
+        self.refresh_index, completed_cycle = next_scan_index(
+            index,
+            len(self.current_scan_symbols)
+        )
+        self.scan_batch_position += 1
+        continue_current_batch = (
+            not completed_cycle
+            and self.scan_batch_position < self.get_scan_batch_size()
         )
 
-    def schedule_scan_loop(self):
+        if not continue_current_batch:
+            self.scan_batch_position = 0
 
-        self.scan_after_id = self.app.after(SCAN_INTERVAL_MS, self.scan_one_coin)
+        self.last_scan_batch_time = current_polish_time()
+
+        if self.is_top_bybit_mode() and not continue_current_batch:
+            self.sort_top50_cards_if_needed()
+
+        if completed_cycle:
+            self.mark_scan_cycle_completed(len(self.current_scan_symbols))
+
+        self.perf_log(
+            "scan_result_ui",
+            callback_started_at,
+            mode=scan_mode_label(self.scan_mode, self.top_bybit_limit),
+            symbol=symbol
+        )
+        delay_ms = 0 if continue_current_batch else SCAN_INTERVAL_MS
+        self.schedule_scan_loop(delay_ms)
+        return True
+
+    def schedule_scan_loop(self, delay_ms=SCAN_INTERVAL_MS):
+
+        if self.shutdown_requested:
+            return
+
+        self.scan_after_id = self.app.after(delay_ms, self.scan_one_coin)
+
+    def schedule_scan_result_poll(self):
+
+        if self.shutdown_requested or self.scan_result_after_id is not None:
+            return
+
+        self.scan_result_after_id = self.app.after(
+            SCAN_RESULT_POLL_MS,
+            self.process_scan_results
+        )
+
+    def cancel_scan_result_poll(self):
+
+        if self.scan_result_after_id is None:
+            return
+
+        try:
+            self.app.after_cancel(self.scan_result_after_id)
+        except Exception:
+            pass
+        self.scan_result_after_id = None
 
     def cancel_scan_loop(self):
 
@@ -365,11 +629,12 @@ class SmartTradeUI:
 
         self.cancel_scan_loop()
         self.reset_scan_state_for_new_run()
+        self.begin_scan_generation()
         self.clear_watchlist_cards()
         self.build_watchlist_cards()
         self.update_scan_status(SCAN_START, GREEN)
         self.update_scan_progress(None, 0, len(self.get_scan_symbols()))
-        self.scan_one_coin()
+        self.schedule_scan_loop(0)
 
     def reset_scan_state_for_new_run(self):
 
@@ -495,6 +760,7 @@ class SmartTradeUI:
     def reset_scan_cycle_state(self):
 
         self.scan_cycle_number = 0
+        self.scan_batch_position = 0
         self.scan_cycle_started_at = None
         self.last_scan_batch_time = None
         self.last_full_scan_time = None
@@ -526,6 +792,7 @@ class SmartTradeUI:
         if mode == self.scan_mode:
             return
 
+        self.cancel_scan_loop()
         self.scan_mode = mode
         self.refresh_index = 0
         self.top50_results = {}
@@ -541,6 +808,8 @@ class SmartTradeUI:
 
         self.update_scan_mode_buttons()
         self.build_watchlist_cards()
+        self.begin_scan_generation()
+        self.schedule_scan_loop(0)
 
     def load_top50_scan_symbols(self):
 
@@ -628,62 +897,87 @@ class SmartTradeUI:
                     border_color=BORDER_COLOR
                 )
 
-    def update_watchlist_coin(self, coin, index):
+    def update_watchlist_coin(
+        self,
+        coin,
+        index,
+        *,
+        scan_id=None,
+        interval=None,
+        total_symbols=0,
+        job_id=None,
+        scan_range=None
+    ):
 
         symbol = coin["symbol"]
+        interval = interval or self.selected_interval
         symbol_started_at = time.perf_counter()
-
-        fetch_started_at = time.perf_counter()
-        df = get_klines(
+        result = self.create_scan_result_record(
+            scan_id,
             symbol,
-            interval=self.selected_interval
+            index,
+            "running",
+            interval=interval,
+            total_symbols=total_symbols,
+            job_id=job_id,
+            scan_range=scan_range
         )
-        self.perf_log("fetch_klines", fetch_started_at, symbol=symbol)
-        df.attrs["symbol"] = symbol
-        df.attrs["timeframe"] = self.selected_interval
 
-        rsi_started_at = time.perf_counter()
-        rsi = calculate_rsi(df)
-        self.perf_log("calculate_rsi", rsi_started_at, symbol=symbol)
+        try:
+            fetch_started_at = time.perf_counter()
+            df = get_klines(symbol, interval=interval)
+            self.perf_log("fetch_klines", fetch_started_at, symbol=symbol)
+            df.attrs["symbol"] = symbol
+            df.attrs["timeframe"] = interval
 
-        candles_started_at = time.perf_counter()
-        candles = self.prepare_engine_candles(df)
-        self.perf_log("prepare_candles", candles_started_at, symbol=symbol)
+            rsi_started_at = time.perf_counter()
+            rsi = calculate_rsi(df)
+            self.perf_log("calculate_rsi", rsi_started_at, symbol=symbol)
 
-        divergence_started_at = time.perf_counter()
-        divergences = self.find_coin_divergences_from_candles(candles)
-        self.perf_log("find_divergences", divergence_started_at, symbol=symbol)
+            candles_started_at = time.perf_counter()
+            candles = self.prepare_engine_candles(df, interval=interval)
+            self.perf_log("prepare_candles", candles_started_at, symbol=symbol)
 
-        select_started_at = time.perf_counter()
-        best_divergence = self.select_freshest_best_signal(divergences, len(candles))
-        self.perf_log("select_signal", select_started_at, symbol=symbol)
+            divergence_started_at = time.perf_counter()
+            divergences = self.find_coin_divergences_from_candles(candles)
+            self.perf_log("find_divergences", divergence_started_at, symbol=symbol)
 
-        if PERF_DEBUG and best_divergence is not None:
-            quality_started_at = time.perf_counter()
-            calculate_quality_score(best_divergence.get("quality"))
-            self.perf_log("quality_score", quality_started_at, symbol=symbol)
+            select_started_at = time.perf_counter()
+            best_divergence = self.select_freshest_best_signal(divergences, len(candles))
+            self.perf_log("select_signal", select_started_at, symbol=symbol)
 
-        alert_started_at = time.perf_counter()
-        self.process_alert_candidate(symbol, best_divergence, len(candles))
-        self.perf_log("alert_candidate", alert_started_at, symbol=symbol)
+            quality_score = None
+            candles_ago = None
+            signal_status = ""
+            ui_visible = False
+            if best_divergence is not None:
+                quality_score = calculate_quality_score(best_divergence.get("quality"))
+                candles_ago = self.signal_age(best_divergence, len(candles))
+                signal_status, _status_color = self.signal_status(best_divergence, len(candles))
+                ui_visible = self.is_visible_signal(best_divergence, len(candles))
 
-        if self.is_top_bybit_mode():
-            self.top50_results[symbol] = {
-                "symbol": symbol,
-                "rsi": rsi,
-                "divergence": best_divergence,
-                "candle_count": len(candles)
-            }
-            card_started_at = time.perf_counter()
-            self.update_top50_result_card(symbol)
-            self.perf_log("update_card", card_started_at, symbol=symbol)
-            self.perf_log("scan_symbol", symbol_started_at, symbol=symbol)
-            return
+            result.update(
+                {
+                    "status": "signal_found" if best_divergence is not None else "no_signal",
+                    "rsi": rsi,
+                    "divergence": best_divergence,
+                    "candle_count": len(candles),
+                    "quality": quality_score,
+                    "candles_ago": candles_ago,
+                    "signal_status": signal_status,
+                    "alert_candidate": best_divergence,
+                    "ui_visible": ui_visible
+                }
+            )
+        except Exception as error:
+            result["status"] = "error"
+            result["error"] = f"{type(error).__name__}: {error}"
+        finally:
+            result["worker_duration_ms"] = (
+                time.perf_counter() - symbol_started_at
+            ) * 1000
 
-        card_started_at = time.perf_counter()
-        self.update_watchlist_card(index, symbol, rsi, best_divergence, len(candles))
-        self.perf_log("update_card", card_started_at, symbol=symbol)
-        self.perf_log("scan_symbol", symbol_started_at, symbol=symbol)
+        return result
 
     def find_coin_divergences_from_candles(self, candles):
 
@@ -932,7 +1226,21 @@ class SmartTradeUI:
 
     def update_watchlist_card(self, index, symbol, rsi, divergence, candle_count):
 
+        if index < 0 or index >= len(self.buttons):
+            return False
+
         card = self.buttons[index]
+        frame = card.get("frame")
+        if frame is None:
+            return False
+
+        try:
+            if not frame.winfo_exists():
+                return False
+        except AttributeError:
+            pass
+
+        self.bind_card_click(frame, symbol)
 
         if divergence is None:
             status = ""
@@ -973,7 +1281,7 @@ class SmartTradeUI:
         cache_key = card["symbol_value"]
 
         if self.last_card_texts.get(cache_key) == card_text:
-            return
+            return True
 
         self.last_card_texts[cache_key] = card_text
 
@@ -1003,6 +1311,7 @@ class SmartTradeUI:
             text=card_text["rsi"],
             text_color=rsi_color
         )
+        return True
 
     def update_rsi_card_visibility(self, card):
 
@@ -1173,11 +1482,11 @@ class SmartTradeUI:
 
         return max(0, candle_count - 1 - divergence.get("confirmed_index", divergence["price_end"]["index"]))
 
-    def prepare_engine_candles(self, df):
+    def prepare_engine_candles(self, df, interval=None):
 
         candles = df[["time", "open", "high", "low", "close"]].copy()
         candles.attrs["symbol"] = df.attrs.get("symbol", "UNKNOWN")
-        candles.attrs["timeframe"] = self.selected_interval
+        candles.attrs["timeframe"] = interval or self.selected_interval
 
         candles["time"] = candles["time"].astype(float).astype(int) // 1000
 
@@ -1252,7 +1561,6 @@ class SmartTradeUI:
 
         labels["frame"] = frame
         labels["symbol_value"] = symbol
-
         return labels
 
     def create_card_value(self, parent, column, title, value, color):
@@ -1453,6 +1761,7 @@ class SmartTradeUI:
 
     def reload_watchlist(self):
 
+        self.cancel_scan_loop()
         self.watchlist_symbols = get_watchlist()
 
         if self.scan_mode == SCAN_MODE_WATCHLIST:
@@ -1461,6 +1770,9 @@ class SmartTradeUI:
         self.refresh_index = 0
 
         self.build_watchlist_cards()
+        self.reset_scan_cycle_state()
+        self.begin_scan_generation()
+        self.schedule_scan_loop(0)
 
     def build_watchlist_cards(self):
 
@@ -1562,16 +1874,61 @@ class SmartTradeUI:
         card = self.cards_by_symbol.get(symbol)
 
         if card is None:
-            return
+            return False
 
         result = self.top50_results[symbol]
-        self.update_watchlist_card(
+        return self.update_watchlist_card(
             card["index"],
             result["symbol"],
             result["rsi"],
             result["divergence"],
             result["candle_count"]
         )
+
+    def build_top_scan_ranking(self):
+
+        results = []
+        for position, symbol in enumerate(self.current_scan_symbols):
+            result = self.current_scan_results.get(symbol)
+            if result is None:
+                result = self.create_scan_result_record(
+                    self.current_scan_id,
+                    symbol,
+                    position,
+                    "pending"
+                )
+            result["position"] = position
+            results.append(result)
+
+        return sorted(
+            results,
+            key=lambda result: (
+                1 if result.get("divergence") is not None else 0,
+                result.get("quality") or 0,
+                self.get_signal_sort_key(result),
+                -result["position"]
+            ),
+            reverse=True
+        )
+
+    def process_visible_top_alerts(self, results):
+
+        for result in results:
+            if not result.get("ui_visible"):
+                continue
+            if (result.get("quality") or 0) < MIN_VISIBLE_QUALITY:
+                continue
+
+            sent = self.process_alert_candidate(
+                result["symbol"],
+                result.get("alert_candidate") or result.get("divergence"),
+                result.get("candle_count", 0),
+                ui_ready=True,
+                interval=result.get("interval"),
+                scan_range=result.get("scan_range")
+            )
+            if sent:
+                self.scan_cycle_alert_sent_count += 1
 
     def reorder_top50_cards(self, sorted_results):
 
@@ -1879,27 +2236,40 @@ class SmartTradeUI:
 
         return self.scan_mode
 
-    def process_alert_candidate(self, symbol, divergence, candle_count):
+    def process_alert_candidate(
+        self,
+        symbol,
+        divergence,
+        candle_count,
+        *,
+        ui_ready=True,
+        interval=None,
+        scan_range=None
+    ):
 
-        if divergence is None:
-            return
+        if divergence is None or not ui_ready:
+            return False
 
         status, _status_color = self.signal_status(divergence, candle_count)
         age_text = self.signal_age_text(divergence, candle_count)
         quality_score = calculate_quality_score(divergence.get("quality"))
 
-        self.alert_manager.process_signal(
+        sent = self.alert_manager.process_signal(
             symbol,
-            self.selected_interval,
-            self.get_alert_scan_range(),
+            interval or self.selected_interval,
+            scan_range or self.get_alert_scan_range(),
             divergence,
             status,
             age_text,
             quality_score=quality_score
         )
         self.update_alert_status_labels()
+        return sent
 
     def process_due_alerts(self):
+
+        if self.shutdown_requested:
+            return
 
         self.alert_manager.process_due_alerts()
         self.update_alert_status_labels()
@@ -2251,9 +2621,14 @@ class SmartTradeUI:
 
         self.update_polish_time()
         self.process_due_alerts()
-        self.scan_one_coin()
+        self.begin_scan_generation()
+        self.schedule_scan_result_poll()
+        self.schedule_scan_loop(0)
 
     def update_polish_time(self):
+
+        if self.shutdown_requested:
+            return
 
         current_time = current_polish_time()
 
@@ -2311,3 +2686,22 @@ class SmartTradeUI:
     def run(self):
 
         self.app.mainloop()
+
+    def shutdown_app(self):
+
+        if getattr(self, "shutdown_requested", False):
+            return
+
+        self.shutdown_requested = True
+        self.scan_generation = getattr(self, "scan_generation", 0) + 1
+        self.current_scan_id = self.scan_generation
+        self.cancel_scan_loop()
+        self.cancel_scan_result_poll()
+        self.clear_scan_result_queue()
+        self.scan_shutdown_event.set()
+        self.scan_job_event.set()
+
+        try:
+            self.app.destroy()
+        except Exception:
+            pass

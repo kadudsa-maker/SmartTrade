@@ -1,4 +1,5 @@
 import ui as ui_module
+from queue import Queue
 
 from ui import (
     DEFAULT_RSI_SORT_MODE,
@@ -80,6 +81,11 @@ class FakeApp:
 
     def __init__(self):
         self.cancelled = []
+        self.scheduled = []
+
+    def after(self, delay_ms, callback):
+        self.scheduled.append((delay_ms, callback))
+        return "scan-after-2"
 
     def after_cancel(self, after_id):
         self.cancelled.append(after_id)
@@ -313,7 +319,17 @@ def test_scan_restart_resets_scan_state_without_changing_user_modes():
     rebuilt = []
 
     ui.app = FakeApp()
+    ui.shutdown_requested = False
     ui.scan_after_id = "scan-after-1"
+    ui.scan_generation = 4
+    ui.current_scan_id = 4
+    ui.current_scan_symbols = ["OLDUSDT"]
+    ui.current_scan_results = {"OLDUSDT": {"symbol": "OLDUSDT"}}
+    ui.current_scan_rendered = 1
+    ui.scan_cycle_alert_sent_count = 1
+    ui.scan_result_queue = Queue()
+    ui.scan_worker_thread = object()
+    worker = ui.scan_worker_thread
     ui.refresh_index = 7
     ui.top50_results = {"BTCUSDT": {"symbol": "BTCUSDT"}}
     ui.last_top50_sort_at = 123
@@ -342,7 +358,14 @@ def test_scan_restart_resets_scan_state_without_changing_user_modes():
     ui.scan_now()
 
     assert ui.app.cancelled == ["scan-after-1"]
-    assert ui.scan_after_id is None
+    assert ui.current_scan_id == 5
+    assert ui.current_scan_symbols == ["BTCUSDT", "ETHUSDT"]
+    assert ui.current_scan_results == {}
+    assert ui.scan_worker_thread is worker
+    assert ui.scan_after_id == "scan-after-2"
+    assert ui.app.scheduled[0][0] == 0
+    assert started == []
+    ui.app.scheduled[0][1]()
     assert ui.refresh_index == 0
     assert ui.top50_results == {}
     assert ui.last_top50_order == []
