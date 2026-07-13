@@ -3,6 +3,7 @@ import time
 from tkinter import BooleanVar, StringVar, messagebox
 
 from alerts import AlertManager
+from app_paths import configure_windows_window_icon
 from chart import SmartTradeChart
 from config import (
     ACTIVE_MAX_CANDLES,
@@ -131,6 +132,8 @@ class SmartTradeUI:
         ctk.set_default_color_theme("blue")
 
         self.app = ctk.CTk()
+        self.set_window_icon()
+        self.app.after(250, self.set_window_icon)
         self.app.geometry("1400x800")
         self.app.title(APP_TITLE)
         self.app.configure(fg_color=BG_COLOR)
@@ -185,6 +188,10 @@ class SmartTradeUI:
             self.load_top50_scan_symbols()
 
         self.build_ui()
+
+    def set_window_icon(self):
+
+        configure_windows_window_icon(self.app)
 
     def perf_log(self, label, started_at, **fields):
 

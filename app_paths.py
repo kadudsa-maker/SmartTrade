@@ -8,6 +8,7 @@ from pathlib import Path
 
 
 APP_NAME = "SmartTrade"
+WINDOWS_APP_USER_MODEL_ID = "SmartTrade.SmartTrade"
 
 
 DEFAULT_ALERT_SETTINGS = {
@@ -44,6 +45,78 @@ def resource_path(*parts):
 
     base = Path(getattr(sys, "_MEIPASS", app_base_dir()))
     return base.joinpath(*parts)
+
+
+def configure_windows_app_identity():
+
+    if sys.platform != "win32":
+        return
+
+    import ctypes
+
+    shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+    set_app_id = shell32.SetCurrentProcessExplicitAppUserModelID
+    set_app_id.argtypes = [ctypes.c_wchar_p]
+    set_app_id.restype = ctypes.c_long
+
+    result = set_app_id(WINDOWS_APP_USER_MODEL_ID)
+    if result != 0:
+        raise OSError(f"SetCurrentProcessExplicitAppUserModelID failed: 0x{result & 0xFFFFFFFF:08X}")
+
+
+def configure_windows_window_icon(window):
+
+    if sys.platform != "win32":
+        return
+
+    import ctypes
+
+    icon_path = str(resource_path("SmartTrade.ico"))
+    window.iconbitmap(default=icon_path)
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    load_image = user32.LoadImageW
+    load_image.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_wchar_p,
+        ctypes.c_uint,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_uint
+    ]
+    load_image.restype = ctypes.c_void_p
+
+    send_message = user32.SendMessageW
+    send_message.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p, ctypes.c_void_p]
+    send_message.restype = ctypes.c_void_p
+
+    destroy_icon = user32.DestroyIcon
+    destroy_icon.argtypes = [ctypes.c_void_p]
+    destroy_icon.restype = ctypes.c_bool
+
+    get_ancestor = user32.GetAncestor
+    get_ancestor.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+    get_ancestor.restype = ctypes.c_void_p
+
+    big_icon = load_image(None, icon_path, 1, 32, 32, 0x0010)
+    small_icon = load_image(None, icon_path, 1, 16, 16, 0x0010)
+    if not big_icon or not small_icon:
+        if big_icon:
+            destroy_icon(big_icon)
+        if small_icon:
+            destroy_icon(small_icon)
+        raise ctypes.WinError(ctypes.get_last_error())
+
+    window_handle = get_ancestor(window.winfo_id(), 2)
+    if not window_handle:
+        window_handle = window.winfo_id()
+    send_message(window_handle, 0x0080, 1, big_icon)
+    send_message(window_handle, 0x0080, 0, small_icon)
+
+    previous_icons = getattr(window, "_smarttrade_icon_handles", ())
+    window._smarttrade_icon_handles = (big_icon, small_icon)
+    for previous_icon in previous_icons:
+        destroy_icon(previous_icon)
 
 
 def user_data_dir():

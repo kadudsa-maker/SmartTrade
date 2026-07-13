@@ -20,6 +20,10 @@ ca_bundle = project_dir / "data" / "windows_ca_bundle.pem"
 if ca_bundle.exists():
     datas.append((str(ca_bundle), "data"))
 
+app_icon = project_dir / "SmartTrade.ico"
+if app_icon.exists():
+    datas.append((str(app_icon), "."))
+
 hiddenimports = []
 hiddenimports += collect_submodules("pybit")
 
@@ -77,7 +81,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=None,
+    icon=str(project_dir / "SmartTrade.ico"),
 )
 coll = COLLECT(
     exe,

@@ -1,6 +1,7 @@
 from app_paths import (
     configure_https_certificates,
     configure_runtime_logging,
+    configure_windows_app_identity,
     ensure_runtime_environment,
     log_startup_exception
 )
@@ -11,6 +12,7 @@ def main():
     ensure_runtime_environment()
     configure_https_certificates()
     configure_runtime_logging()
+    configure_windows_app_identity()
 
     try:
         from ui import SmartTradeUI
