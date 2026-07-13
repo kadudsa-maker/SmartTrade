@@ -1,10 +1,13 @@
 import json
 import time
-from pathlib import Path
 
 import pandas as pd
-from pybit.unified_trading import HTTP
 
+from app_paths import configure_https_certificates, runtime_path
+
+configure_https_certificates()
+
+from pybit.unified_trading import HTTP
 from config import (
     ALL_BYBIT_SYMBOLS_CACHE_TTL,
     DEFAULT_KLINE_LIMIT,
@@ -17,7 +20,7 @@ from rsi import calculate_latest_rsi
 
 session = HTTP(testnet=False)
 
-WATCHLIST_PATH = Path("data/watchlist.json")
+WATCHLIST_PATH = runtime_path("data", "watchlist.json")
 
 # CACHE
 cache = {}

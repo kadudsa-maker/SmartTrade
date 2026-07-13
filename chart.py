@@ -8,6 +8,7 @@ from divergence import find_regular_divergences
 from pivots import find_pivots, find_rsi_pivots
 from rsi import calculate_rsi_series
 from signal_quality import calculate_quality_score
+from strings import CHART_NO_DATA
 from time_utils import format_polish_time
 
 
@@ -455,7 +456,7 @@ class SmartTradeChart:
         self.canvas.create_text(
             self.canvas.winfo_width() / 2,
             self.canvas.winfo_height() / 2,
-            text="Brak danych wykresu",
+            text=CHART_NO_DATA,
             fill="#dddddd",
             font=("Arial", 16, "bold")
         )

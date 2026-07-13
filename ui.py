@@ -33,6 +33,39 @@ from pivots import find_pivots, find_rsi_pivots
 from rsi import calculate_rsi_series
 from scanner_state import run_scan_batch, scan_mode_label
 from signal_quality import calculate_quality_score
+from strings import (
+    ALERTS_BUTTON,
+    APP_TITLE,
+    BYBIT_FETCH_TOP_EMPTY,
+    BYBIT_FETCH_TOP_ERROR,
+    BYBIT_TOP_WARNING,
+    CANCEL_BUTTON,
+    CLOSE_BUTTON,
+    COIN_LIST_EMPTY,
+    COIN_LIST_ERROR,
+    COIN_NO_RESULTS,
+    COIN_SEARCH_LABEL,
+    COIN_SELECTOR_HEADER,
+    COIN_SELECTOR_TITLE,
+    GUIDE_BUTTON,
+    GUIDE_CONTENT,
+    GUIDE_NOTE,
+    GUIDE_TITLE,
+    MINIMUM_QUALITY_ERROR,
+    OPEN_CHART,
+    OPEN_CHART_EMPTY,
+    PL_TIME,
+    PL_TIME_LABEL,
+    RESET_TOP20_BUTTON,
+    SAVE_BUTTON,
+    SCAN_LOADING_BYBIT,
+    SCAN_READY,
+    SCAN_START,
+    WATCHLIST_EMPTY,
+    WATCHLIST_RESET_CONFIRM,
+    WATCHLIST_RESET_ERROR,
+    WATCHLIST_SAVE_ERROR
+)
 from time_utils import current_polish_time, format_polish_time
 
 
@@ -99,7 +132,7 @@ class SmartTradeUI:
 
         self.app = ctk.CTk()
         self.app.geometry("1400x800")
-        self.app.title("SmartTrade")
+        self.app.title(APP_TITLE)
         self.app.configure(fg_color=BG_COLOR)
 
         self.selected_symbol = None
@@ -317,7 +350,7 @@ class SmartTradeUI:
 
     def scan_now(self):
 
-        self.update_scan_status("SCAN: pobieram Bybit...", MUTED_TEXT_COLOR)
+        self.update_scan_status(SCAN_LOADING_BYBIT, MUTED_TEXT_COLOR)
         prepared = self.prepare_scan_queue_for_restart()
 
         if not prepared:
@@ -327,7 +360,7 @@ class SmartTradeUI:
         self.reset_scan_state_for_new_run()
         self.clear_watchlist_cards()
         self.build_watchlist_cards()
-        self.update_scan_status("SCAN: start", GREEN)
+        self.update_scan_status(SCAN_START, GREEN)
         self.update_scan_progress(None, 0, len(self.get_scan_symbols()))
         self.scan_one_coin()
 
@@ -356,7 +389,7 @@ class SmartTradeUI:
                 symbols = get_watchlist()
 
                 if not symbols:
-                    self.show_scan_connection_error("Watchlist jest pusta.")
+                    self.show_scan_connection_error(WATCHLIST_EMPTY)
                     return False
 
                 self.watchlist_symbols = symbols
@@ -367,7 +400,7 @@ class SmartTradeUI:
 
         except Exception as error:
             self.show_scan_connection_error(
-                f"Nie można pobrać Top {self.top_bybit_limit} Bybit: {error}"
+                BYBIT_FETCH_TOP_ERROR.format(limit=self.top_bybit_limit, error=error)
             )
             return False
 
@@ -375,11 +408,11 @@ class SmartTradeUI:
             last_error = get_top_bybit_last_error()
             if last_error is not None:
                 self.show_scan_connection_error(
-                    f"Nie można pobrać Top {self.top_bybit_limit} Bybit: {last_error}"
+                    BYBIT_FETCH_TOP_ERROR.format(limit=self.top_bybit_limit, error=last_error)
                 )
             else:
                 self.show_scan_connection_error(
-                    f"Bybit nie zwrócił symboli Top {self.top_bybit_limit}."
+                    BYBIT_FETCH_TOP_EMPTY.format(limit=self.top_bybit_limit)
                 )
             return False
 
@@ -391,7 +424,7 @@ class SmartTradeUI:
 
         print(f"Bybit connection error: {message}")
         self.update_scan_status("Bybit connection error", RED)
-        messagebox.showerror("SmartTrade", message)
+        messagebox.showerror(APP_TITLE, message)
 
     def update_scan_status(self, text, color=MUTED_TEXT_COLOR):
 
@@ -508,8 +541,8 @@ class SmartTradeUI:
 
         if not symbols:
             messagebox.showwarning(
-                "SmartTrade",
-                f"Nie udalo sie pobrac Top {self.top_bybit_limit} Bybit. Sprobuj ponownie za chwile."
+                APP_TITLE,
+                BYBIT_TOP_WARNING.format(limit=self.top_bybit_limit)
             )
 
         self.top50_symbols = symbols
@@ -1054,8 +1087,14 @@ class SmartTradeUI:
 
         quality_score = calculate_quality_score(divergence.get("quality"))
 
-        if quality_score >= 60:
+        if quality_score < 60:
+            return TEXT_COLOR
+
+        if divergence.get("type") == "bullish":
             return GREEN
+
+        if divergence.get("type") == "bearish":
+            return RED
 
         return TEXT_COLOR
 
@@ -1113,12 +1152,12 @@ class SmartTradeUI:
         age = self.signal_age(divergence, candle_count)
 
         if age == 0:
-            return "0 świec temu"
+            return "0 candles ago"
 
         if age == 1:
-            return "1 świeca temu"
+            return "1 candle ago"
 
-        return f"{age} świece temu"
+        return f"{age} candles ago"
 
     def signal_age(self, divergence, candle_count):
 
@@ -1264,20 +1303,20 @@ class SmartTradeUI:
             symbols = get_all_bybit_symbols()
         except Exception as error:
             messagebox.showerror(
-                "SmartTrade",
-                f"Nie udało się pobrać listy coinów z Bybit.\n\n{error}"
+                APP_TITLE,
+                COIN_LIST_ERROR.format(error=error)
             )
             return
 
         if not symbols:
             messagebox.showwarning(
-                "SmartTrade",
-                "Bybit nie zwrócił żadnych kontraktów USDT Perpetual."
+                APP_TITLE,
+                COIN_LIST_EMPTY
             )
             return
 
         window = ctk.CTkToplevel(self.app)
-        window.title("Wybierz coina")
+        window.title(COIN_SELECTOR_TITLE)
         window.geometry("360x520")
         window.configure(fg_color=BG_COLOR)
         window.transient(self.app)
@@ -1285,7 +1324,7 @@ class SmartTradeUI:
 
         ctk.CTkLabel(
             window,
-            text=f"Zmień {current_symbol}",
+            text=COIN_SELECTOR_HEADER.format(symbol=current_symbol),
             font=("Arial", 18, "bold"),
             text_color=TEXT_COLOR
         ).pack(pady=(14, 10))
@@ -1295,7 +1334,7 @@ class SmartTradeUI:
 
         ctk.CTkLabel(
             search_frame,
-            text="🔍 Szukaj",
+            text=COIN_SEARCH_LABEL,
             font=("Arial", 12, "bold"),
             text_color=MUTED_TEXT_COLOR
         ).pack(anchor="w")
@@ -1330,7 +1369,7 @@ class SmartTradeUI:
             if not filtered_symbols:
                 ctk.CTkLabel(
                     scroll,
-                    text="Brak wyników",
+                    text=COIN_NO_RESULTS,
                     font=("Arial", 13, "bold"),
                     text_color=MUTED_TEXT_COLOR
                 ).pack(fill="x", padx=6, pady=10)
@@ -1369,8 +1408,8 @@ class SmartTradeUI:
             save_watchlist(updated_symbols)
         except Exception as error:
             messagebox.showerror(
-                "SmartTrade",
-                f"Nie udało się zapisać watchlisty.\n\n{error}"
+                APP_TITLE,
+                WATCHLIST_SAVE_ERROR.format(error=error)
             )
             return
 
@@ -1386,8 +1425,8 @@ class SmartTradeUI:
     def reset_watchlist_to_top20(self):
 
         confirmed = messagebox.askyesno(
-            "SmartTrade",
-            "Nadpisać watchlistę aktualnym Top20 Bybit według 24h Turnover?"
+            APP_TITLE,
+            WATCHLIST_RESET_CONFIRM
         )
 
         if not confirmed:
@@ -1397,8 +1436,8 @@ class SmartTradeUI:
             reset_watchlist()
         except Exception as error:
             messagebox.showerror(
-                "SmartTrade",
-                f"Nie udało się zresetować watchlisty.\n\n{error}"
+                APP_TITLE,
+                WATCHLIST_RESET_ERROR.format(error=error)
             )
             return
 
@@ -1627,6 +1666,56 @@ class SmartTradeUI:
 
         self.update_scan_mode_buttons()
 
+    def open_guide_dialog(self):
+
+        window = ctk.CTkToplevel(self.app)
+        window.title(GUIDE_TITLE)
+        window.geometry("560x680")
+        window.minsize(480, 520)
+        window.configure(fg_color=BG_COLOR)
+        window.transient(self.app)
+        window.grab_set()
+
+        ctk.CTkLabel(
+            window,
+            text=GUIDE_TITLE,
+            font=("Arial", 18, "bold"),
+            text_color=TEXT_COLOR
+        ).pack(fill="x", padx=18, pady=(16, 10))
+
+        guide_text = ctk.CTkTextbox(
+            window,
+            fg_color=PANEL_COLOR,
+            border_color=BORDER_COLOR,
+            border_width=1,
+            text_color=TEXT_COLOR,
+            wrap="word"
+        )
+        guide_text.pack(fill="both", expand=True, padx=18, pady=(0, 10))
+        guide_text.insert("1.0", GUIDE_CONTENT)
+        guide_text.configure(state="disabled")
+
+        ctk.CTkLabel(
+            window,
+            text=GUIDE_NOTE,
+            font=("Arial", 11, "bold"),
+            text_color=MUTED_TEXT_COLOR,
+            wraplength=500,
+            justify="center"
+        ).pack(fill="x", padx=18, pady=(0, 12))
+
+        ctk.CTkButton(
+            window,
+            text=CLOSE_BUTTON,
+            width=120,
+            height=34,
+            fg_color=BLUE,
+            hover_color="#2D83C4",
+            text_color="#FFFFFF",
+            corner_radius=8,
+            command=window.destroy
+        ).pack(pady=(0, 16))
+
     def build_top_bar(self):
 
         top_bar = ctk.CTkFrame(
@@ -1642,7 +1731,7 @@ class SmartTradeUI:
 
         self.top_time_label = ctk.CTkLabel(
             top_bar,
-            text="Czas PL: --:--:--",
+            text=PL_TIME_LABEL,
             font=("Arial", 13, "bold"),
             text_color=MUTED_TEXT_COLOR
         )
@@ -1657,15 +1746,30 @@ class SmartTradeUI:
 
         self.open_chart_label = ctk.CTkLabel(
             top_bar,
-            text="Otwarty: —",
+            text=OPEN_CHART_EMPTY,
             font=("Arial", 13, "bold"),
             text_color=TEXT_COLOR
         )
         self.open_chart_label.pack(side="left", padx=(0, 10))
 
+        guide_button = ctk.CTkButton(
+            top_bar,
+            text=GUIDE_BUTTON,
+            width=82,
+            height=28,
+            fg_color=PANEL_COLOR,
+            hover_color=BORDER_COLOR,
+            border_color=BORDER_COLOR,
+            border_width=1,
+            text_color=BLUE,
+            corner_radius=8,
+            command=self.open_guide_dialog
+        )
+        guide_button.pack(side="left", padx=(0, 10))
+
         self.alerts_button = ctk.CTkButton(
             top_bar,
-            text="🔔 Alerts",
+            text=ALERTS_BUTTON,
             width=96,
             height=28,
             fg_color=PANEL_COLOR,
@@ -1703,7 +1807,7 @@ class SmartTradeUI:
 
         self.scan_status_label = ctk.CTkLabel(
             top_bar,
-            text="SCAN ready",
+            text=SCAN_READY,
             font=("Arial", 12, "bold"),
             text_color=MUTED_TEXT_COLOR
         )
@@ -1744,7 +1848,7 @@ class SmartTradeUI:
         if self.open_chart_label is not None:
             self.configure_label_if_changed(
                 self.open_chart_label,
-                text=f"Otwarty: {self.selected_symbol or '—'}"
+                text=OPEN_CHART.format(symbol=self.selected_symbol or "-")
             )
 
     def interval_label(self, interval):
@@ -1918,8 +2022,8 @@ class SmartTradeUI:
                 minimum_quality = clamp_alert_quality(minimum_quality_var.get())
             except (TypeError, ValueError):
                 messagebox.showerror(
-                    "SmartTrade",
-                    "Minimum Quality musi być liczbą od 0 do 100."
+                    APP_TITLE,
+                    MINIMUM_QUALITY_ERROR
                 )
                 return
 
@@ -1946,7 +2050,7 @@ class SmartTradeUI:
 
         ctk.CTkButton(
             button_bar,
-            text="Anuluj",
+            text=CANCEL_BUTTON,
             height=36,
             fg_color=PANEL_COLOR,
             hover_color=BORDER_COLOR,
@@ -1985,7 +2089,7 @@ class SmartTradeUI:
 
         ctk.CTkButton(
             button_bar,
-            text="Zapisz",
+            text=SAVE_BUTTON,
             height=36,
             fg_color=BLUE,
             hover_color="#2D83C4",
@@ -2117,7 +2221,7 @@ class SmartTradeUI:
 
         self.reset_watchlist_button = ctk.CTkButton(
             left_controls,
-            text="↻ Reset do Top20 Bybit",
+            text=RESET_TOP20_BUTTON,
             height=34,
             fg_color=PANEL_COLOR,
             hover_color=BORDER_COLOR,
@@ -2149,7 +2253,7 @@ class SmartTradeUI:
         if self.top_time_label is not None:
             self.configure_label_if_changed(
                 self.top_time_label,
-                text=f"Czas PL: {current_time}"
+                text=PL_TIME.format(time=current_time)
             )
 
         self.app.after(1000, self.update_polish_time)

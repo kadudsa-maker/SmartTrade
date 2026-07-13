@@ -4,12 +4,13 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 
+from app_paths import runtime_path
 from signal_quality import calculate_quality_score
 
 
-ALERT_SETTINGS_PATH = Path("data") / "alert_settings.json"
-ALERT_LOG_PATH = Path("logs") / "alerts.log"
-ALERT_OLD_LOG_PATH = Path("logs") / "alerts_old.log"
+ALERT_SETTINGS_PATH = runtime_path("data", "alert_settings.json")
+ALERT_LOG_PATH = runtime_path("logs", "alerts.log")
+ALERT_OLD_LOG_PATH = runtime_path("logs", "alerts_old.log")
 ALERT_LOG_MAX_BYTES = 5 * 1024 * 1024
 SECOND_ALERT_DELAY_SECONDS = 180
 MAX_ALERTS_PER_SIGNAL = 2
