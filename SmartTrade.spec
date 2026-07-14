@@ -26,6 +26,7 @@ if app_icon.exists():
 
 hiddenimports = []
 hiddenimports += collect_submodules("pybit")
+hiddenimports += collect_submodules("exchange_providers")
 
 optional_hiddenimports = [
     "plyer",

@@ -1,272 +1,179 @@
 import json
-import time
-
-import pandas as pd
 
 from app_paths import configure_https_certificates, runtime_path
 
 configure_https_certificates()
 
-from pybit.unified_trading import HTTP
-from config import (
-    ALL_BYBIT_SYMBOLS_CACHE_TTL,
-    DEFAULT_KLINE_LIMIT,
-    DEFAULT_WATCHLIST_LIMIT,
-    KLINE_CACHE_TTL,
-    SYMBOL_SEARCH_LIMIT,
-    TOP_BYBIT_CACHE_TTL
-)
+from config import DEFAULT_KLINE_LIMIT, DEFAULT_WATCHLIST_LIMIT, SYMBOL_SEARCH_LIMIT
+from exchange_providers import ExchangeProviderError, ExchangeSymbol, get_provider
 from rsi import calculate_latest_rsi
 
-session = HTTP(testnet=False)
 
+DEFAULT_EXCHANGE_ID = "bybit"
 WATCHLIST_PATH = runtime_path("data", "watchlist.json")
 
-# CACHE
-cache = {}
-top_bybit_cache = {}
+# Kept as compatibility hooks for existing callers/tests. API details live in providers.
+bybit_provider = get_provider("bybit")
+session = bybit_provider.session
 top_bybit_last_error = None
-all_bybit_symbols_cache = {
-    "time": 0,
-    "symbols": []
-}
+
+
+def get_exchange_provider(exchange_id=DEFAULT_EXCHANGE_ID):
+    return get_provider(exchange_id)
+
+
+def get_instruments(exchange_id=DEFAULT_EXCHANGE_ID, force=False):
+    return get_provider(exchange_id).get_instruments(force=force)
+
+
+def get_top_symbols(exchange_id=DEFAULT_EXCHANGE_ID, limit=50):
+    return get_provider(exchange_id).get_top_symbols(limit)
 
 
 def get_top_bybit_symbols(limit=50):
-    """Return top Bybit USDT linear symbols by 24h turnover, cached per limit."""
-
+    """Compatibility API: identical string list and 24h-turnover ranking."""
     global top_bybit_last_error
-
-    cached = top_bybit_cache.get(limit)
-
-    if (
-        cached
-        and cached["symbols"]
-        and time.time() - cached["time"] < TOP_BYBIT_CACHE_TTL
-    ):
-        return cached["symbols"]
-
     try:
-        response = session.get_tickers(category="linear")
-        tickers = response["result"]["list"]
-
-        usdt_tickers = [
-            ticker
-            for ticker in tickers
-            if ticker.get("symbol", "").endswith("USDT")
-        ]
-
-        sorted_tickers = sorted(
-            usdt_tickers,
-            key=lambda ticker: float(ticker.get("turnover24h", 0)),
-            reverse=True
-        )
-
-        symbols = [ticker["symbol"] for ticker in sorted_tickers[:limit]]
-
+        symbols = bybit_provider.get_top_symbols(limit)
     except Exception as error:
         top_bybit_last_error = error
-        print(f"Nie udało się pobrać Top {limit} Bybit: {error}")
+        print(f"Nie udalo sie pobrac Top {limit} Bybit: {error}")
         return []
-
     top_bybit_last_error = None
-    top_bybit_cache[limit] = {
-        "time": time.time(),
-        "symbols": symbols
-    }
-
-    return symbols
+    return [item.exchange_symbol for item in symbols]
 
 
 def get_top_bybit_last_error():
-
     return top_bybit_last_error
 
 
 def get_top20_usdt_perpetual_symbols(limit=DEFAULT_WATCHLIST_LIMIT):
-
     return get_top_bybit_symbols(limit)
 
 
 def get_all_bybit_symbols():
-    """Return every tradable Bybit linear USDT perpetual symbol with a 10 minute cache."""
-
-    age = time.time() - all_bybit_symbols_cache["time"]
-
-    if all_bybit_symbols_cache["symbols"] and age < ALL_BYBIT_SYMBOLS_CACHE_TTL:
-        return all_bybit_symbols_cache["symbols"]
-
     try:
-        symbols = _fetch_all_bybit_symbols()
-    except Exception as error:
+        return [item.exchange_symbol for item in bybit_provider.get_instruments()]
+    except ExchangeProviderError as error:
         print(f"Nie udalo sie pobrac pelnej listy symboli Bybit: {error}")
-        return all_bybit_symbols_cache["symbols"]
-
-    all_bybit_symbols_cache["time"] = time.time()
-    all_bybit_symbols_cache["symbols"] = symbols
-
-    print(f"Pobrano symbole Bybit USDT Perpetual: {len(symbols)}")
-
-    return symbols
+        return [item.exchange_symbol for item in bybit_provider._instruments]
 
 
 def filter_symbols(symbols, query, limit=SYMBOL_SEARCH_LIMIT):
-    """Filter symbols case-insensitively by partial text and cap UI results."""
-
     normalized_query = query.strip().upper()
-
-    matching_symbols = [
-        symbol
-        for symbol in symbols
-        if normalized_query in symbol.upper()
-    ]
-
-    return matching_symbols[:limit]
-
-
-def _fetch_all_bybit_symbols():
-
-    instruments = []
-    cursor = None
-
-    while True:
-        params = {
-            "category": "linear",
-            "limit": 1000
-        }
-
-        if cursor:
-            params["cursor"] = cursor
-
-        response = session.get_instruments_info(**params)
-        result = response.get("result", {})
-        instruments.extend(result.get("list", []))
-
-        cursor = result.get("nextPageCursor")
-
-        if not cursor:
-            break
-
-    symbols = [
-        instrument["symbol"]
-        for instrument in instruments
-        if instrument.get("quoteCoin") == "USDT"
-        and instrument.get("status") == "Trading"
-        and instrument.get("contractType") == "LinearPerpetual"
-    ]
-
-    return sorted(set(symbols))
+    matches = []
+    for symbol in symbols:
+        text = symbol.display_symbol if isinstance(symbol, ExchangeSymbol) else str(symbol)
+        exchange_text = symbol.exchange_symbol if isinstance(symbol, ExchangeSymbol) else text
+        if normalized_query in text.upper() or normalized_query in exchange_text.upper():
+            matches.append(symbol)
+    return matches[:limit]
 
 
-def load_default_watchlist():
-
-    try:
-        coins = get_top20_usdt_perpetual_symbols()
-    except Exception as error:
-        print(f"Nie udało się pobrać domyślnej watchlisty: {error}")
-        coins = []
-
-    if coins:
-        save_watchlist(coins)
-
-    return coins
-
-
-def save_watchlist(coins):
-
-    WATCHLIST_PATH.parent.mkdir(parents=True, exist_ok=True)
-
-    with WATCHLIST_PATH.open("w", encoding="utf-8") as file:
-        json.dump({"coins": coins}, file, indent=4)
-
-
-def reset_watchlist():
-
-    coins = get_top20_usdt_perpetual_symbols()
-
-    if not coins:
-        raise RuntimeError("Bybit nie zwrócił listy Top20.")
-
-    save_watchlist(coins)
-
-    return coins
-
-
-def get_klines(symbol="BTCUSDT", interval="15", limit=DEFAULT_KLINE_LIMIT):
-    """Fetch ascending Bybit kline data with enough history for stable RSI."""
-
+def get_klines(
+    symbol="BTCUSDT", interval="15", limit=DEFAULT_KLINE_LIMIT,
+    exchange_id=DEFAULT_EXCHANGE_ID
+):
     limit = max(limit, DEFAULT_KLINE_LIMIT)
-    key = f"{symbol}_{interval}_{limit}"
-
-    # jeżeli dane są młodsze niż 30 sekund
-    if key in cache:
-
-        age = time.time() - cache[key]["time"]
-
-        if age < KLINE_CACHE_TTL:
-
-            return cache[key]["data"]
-
-    response = session.get_kline(
-        category="linear",
-        symbol=symbol,
-        interval=interval,
-        limit=limit
-    )
-
-    candles = response["result"]["list"]
-
-    candles.reverse()
-
-    df = pd.DataFrame(
-        candles,
-        columns=[
-            "time",
-            "open",
-            "high",
-            "low",
-            "close",
-            "volume",
-            "turnover"
-        ]
-    )
-
-    df["time"] = pd.to_numeric(df["time"])
-    df = df.sort_values("time").reset_index(drop=True)
-
-    for column in ["open", "high", "low", "close", "volume", "turnover"]:
-        df[column] = df[column].astype(float)
-
-    cache[key] = {
-        "time": time.time(),
-        "data": df
-    }
-
-    return df
+    return get_provider(exchange_id).get_klines(symbol, interval, limit)
 
 
 def calculate_rsi(df, period=14):
-
     return calculate_latest_rsi(df["close"], period=period)
 
 
-def get_watchlist():
-    """Load the saved watchlist or rebuild the default Top20 list."""
+def _watchlist_record(value):
+    if isinstance(value, ExchangeSymbol):
+        return {
+            "exchange_id": value.exchange_id,
+            "exchange_symbol": value.exchange_symbol,
+            "display_symbol": value.display_symbol,
+            "platform_market_name": value.platform_market_name,
+            "asset_class": value.asset_class,
+        }
+    if isinstance(value, str):
+        return {
+            "exchange_id": "bybit", "exchange_symbol": value, "display_symbol": value
+        }
+    if isinstance(value, dict):
+        exchange_id = value.get("exchange_id") or "bybit"
+        exchange_symbol = value.get("exchange_symbol") or value.get("symbol")
+        display_symbol = value.get("display_symbol") or exchange_symbol
+        if exchange_symbol:
+            record = {
+                "exchange_id": exchange_id,
+                "exchange_symbol": exchange_symbol,
+                "display_symbol": display_symbol,
+            }
+            if value.get("platform_market_name"):
+                record["platform_market_name"] = value["platform_market_name"]
+            if value.get("asset_class"):
+                record["asset_class"] = value["asset_class"]
+            return record
+    return None
 
+
+def load_default_watchlist(exchange_id=DEFAULT_EXCHANGE_ID):
+    try:
+        coins = get_provider(exchange_id).get_top_symbols(DEFAULT_WATCHLIST_LIMIT)
+    except Exception as error:
+        print(f"Nie udalo sie pobrac domyslnej watchlisty: {error}")
+        return []
+    save_watchlist(coins, exchange_id=exchange_id)
+    return [item.exchange_symbol for item in coins]
+
+
+def save_watchlist(coins, exchange_id=DEFAULT_EXCHANGE_ID):
+    existing = _load_watchlist_records()
+    retained = [item for item in existing if item["exchange_id"] != exchange_id]
+    records = []
+    for coin in coins:
+        record = _watchlist_record(coin)
+        if record is None:
+            continue
+        if isinstance(coin, str):
+            record["exchange_id"] = exchange_id
+        records.append(record)
+
+    WATCHLIST_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with WATCHLIST_PATH.open("w", encoding="utf-8") as file:
+        json.dump({"instruments": retained + records}, file, indent=4)
+
+
+def reset_watchlist(exchange_id=DEFAULT_EXCHANGE_ID):
+    coins = get_provider(exchange_id).get_top_symbols(DEFAULT_WATCHLIST_LIMIT)
+    if not coins:
+        raise RuntimeError(f"{get_provider(exchange_id).display_name} returned no Top20 list.")
+    save_watchlist(coins, exchange_id=exchange_id)
+    return [item.exchange_symbol for item in coins]
+
+
+def _load_watchlist_records():
     if not WATCHLIST_PATH.exists():
-        return load_default_watchlist()
-
+        return []
     try:
         with WATCHLIST_PATH.open("r", encoding="utf-8") as file:
             data = json.load(file)
-
     except (json.JSONDecodeError, OSError) as error:
-        print(f"Nie udało się odczytać watchlisty: {error}")
-        return load_default_watchlist()
+        print(f"Nie udalo sie odczytac watchlisty: {error}")
+        return []
 
-    coins = data.get("coins", [])
+    raw_items = data.get("instruments")
+    migrated = raw_items is None
+    if raw_items is None:
+        raw_items = data.get("coins", [])
+    records = [record for item in raw_items if (record := _watchlist_record(item))]
+    if migrated and records:
+        WATCHLIST_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with WATCHLIST_PATH.open("w", encoding="utf-8") as file:
+            json.dump({"instruments": records}, file, indent=4)
+    return records
 
-    if not coins:
-        return load_default_watchlist()
 
-    return coins
+def get_watchlist(exchange_id=DEFAULT_EXCHANGE_ID):
+    records = _load_watchlist_records()
+    if not records:
+        return load_default_watchlist(exchange_id)
+    return [
+        item["exchange_symbol"] for item in records if item["exchange_id"] == exchange_id
+    ]

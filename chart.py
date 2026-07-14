@@ -73,7 +73,11 @@ class SmartTradeChart:
 
         source_key = (
             id(df),
+            df.attrs.get("exchange_id"),
+            df.attrs.get("exchange_symbol"),
             df.attrs.get("symbol"),
+            df.attrs.get("platform_market_name"),
+            df.attrs.get("asset_class"),
             df.attrs.get("timeframe")
         )
 
@@ -341,6 +345,10 @@ class SmartTradeChart:
         candles = df[columns].copy()
         candles.attrs["symbol"] = df.attrs.get("symbol", "UNKNOWN")
         candles.attrs["timeframe"] = df.attrs.get("timeframe")
+        candles.attrs["exchange_id"] = df.attrs.get("exchange_id")
+        candles.attrs["exchange_name"] = df.attrs.get("exchange_name")
+        candles.attrs["platform_market_name"] = df.attrs.get("platform_market_name")
+        candles.attrs["asset_class"] = df.attrs.get("asset_class", "other")
 
         candles["time"] = pd.to_numeric(candles["time"])
         candles["time"] = (candles["time"] / 1000).astype(int)

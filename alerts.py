@@ -276,14 +276,17 @@ class AlertManager:
         status,
         age_text,
         quality_score=None,
-        now=None
+        now=None,
+        exchange_id="bybit"
     ):
 
         if divergence is None:
             return False
 
         now = self.current_time(now)
-        signal_id = build_signal_id(symbol, timeframe, divergence)
+        signal_id = build_signal_id(
+            symbol, timeframe, divergence, exchange_id=exchange_id
+        )
         record = self.alert_records.get(signal_id)
 
         if record is None:
@@ -302,7 +305,8 @@ class AlertManager:
             divergence,
             status,
             age_text,
-            quality_score
+            quality_score,
+            exchange_id
         )
         record["event"] = event
 
@@ -345,12 +349,16 @@ class AlertManager:
 
         return sent_count
 
-    def mark_opened_for_symbol(self, symbol):
+    def mark_opened_for_symbol(self, symbol, exchange_id=None):
 
         for record in self.alert_records.values():
             event = record.get("event")
 
-            if event is not None and event["symbol"] == symbol:
+            if (
+                event is not None
+                and event["symbol"] == symbol
+                and (exchange_id is None or event.get("exchange_id") == exchange_id)
+            ):
                 record["opened"] = True
 
     def should_alert(self, event):
@@ -396,7 +404,8 @@ class AlertManager:
         divergence,
         status,
         age_text,
-        quality_score=None
+        quality_score=None,
+        exchange_id="bybit"
     ):
 
         score = quality_score
@@ -406,6 +415,7 @@ class AlertManager:
 
         return {
             "symbol": symbol,
+            "exchange_id": exchange_id,
             "timeframe": timeframe,
             "scan_range": scan_range,
             "type": divergence["type"],
@@ -515,7 +525,7 @@ class AlertManager:
         return time.monotonic()
 
 
-def build_signal_id(symbol, timeframe, divergence):
+def build_signal_id(symbol, timeframe, divergence, exchange_id=None):
 
     confirmed_index = divergence.get(
         "confirmed_index",
@@ -526,13 +536,16 @@ def build_signal_id(symbol, timeframe, divergence):
         divergence["price_end"]["time"]
     )
 
-    return "|".join([
+    identity = [
         symbol,
         timeframe,
         divergence["type"],
         str(confirmed_index),
         str(confirmed_time)
-    ])
+    ]
+    if exchange_id is not None:
+        identity.insert(0, exchange_id)
+    return "|".join(identity)
 
 
 def timeframe_label(timeframe):

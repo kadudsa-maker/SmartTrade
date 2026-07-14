@@ -63,6 +63,14 @@ python main.py
 
 Aplikacja uruchamia interfejs SmartTrade, ładuje watchlistę i pobiera dane rynkowe z Bybit.
 
+## OKX Perpetual
+
+OKX Perpetual uses the public OKX EEA X-Perps catalogue. X-Perps are exposed by
+the API as five-year `FUTURES` records with `ruleType=xperp`; SmartTrade retains
+all active public X-Perps across crypto and traditional asset categories while
+excluding standard expiry futures and global SWAP contracts. Asset classes come
+from OKX instrument metadata. No OKX account or API key is needed.
+
 ## Testy
 
 Po zmianach w projekcie uruchom:

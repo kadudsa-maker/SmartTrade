@@ -25,7 +25,10 @@ from market import (
     calculate_rsi,
     filter_symbols,
     get_all_bybit_symbols,
+    get_exchange_provider,
+    get_instruments,
     get_klines,
+    get_top_symbols,
     get_top_bybit_symbols,
     get_top_bybit_last_error,
     get_watchlist,
@@ -125,6 +128,12 @@ DEFAULT_TOP_BYBIT_LIMIT = 100
 DEFAULT_TIMEFRAME = "60"
 DEFAULT_RSI_VIEW_OPTION = RSI_VIEW_ON
 DEFAULT_RSI_SORT_MODE = RSI_SORT_MODE_QUALITY
+DEFAULT_EXCHANGE_ID = "bybit"
+EXCHANGE_OPTIONS = {
+    "Bybit Futures": "bybit",
+    "OKX Perpetual": "okx",
+    "OKX Spot": "okx_spot",
+}
 
 
 class SmartTradeUI:
@@ -142,11 +151,13 @@ class SmartTradeUI:
         self.app.configure(fg_color=BG_COLOR)
 
         self.selected_symbol = None
+        self.active_exchange_id = DEFAULT_EXCHANGE_ID
+        self.instrument_by_symbol = {}
         self.selected_interval = DEFAULT_TIMEFRAME
         self.scan_mode = DEFAULT_SCAN_MODE
         self.top_bybit_limit = DEFAULT_TOP_BYBIT_LIMIT
 
-        self.watchlist_symbols = get_watchlist()
+        self.watchlist_symbols = get_watchlist(self.active_exchange_id)
         self.top50_symbols = []
         self.top50_results = {}
         self.coins = [{"symbol": coin} for coin in self.watchlist_symbols]
@@ -211,6 +222,219 @@ class SmartTradeUI:
 
         configure_windows_window_icon(self.app)
 
+    def get_active_exchange_id(self):
+
+        return getattr(self, "active_exchange_id", DEFAULT_EXCHANGE_ID)
+
+    def active_provider(self):
+
+        return get_exchange_provider(self.get_active_exchange_id())
+
+    def active_exchange_option(self):
+
+        exchange_id = self.get_active_exchange_id()
+        return next(
+            label for label, value in EXCHANGE_OPTIONS.items() if value == exchange_id
+        )
+
+    def select_exchange(self, option):
+
+        target_exchange_id = EXCHANGE_OPTIONS.get(option, option)
+        if target_exchange_id == self.get_active_exchange_id():
+            return True
+
+        target_provider = get_exchange_provider(target_exchange_id)
+        if not hasattr(self, "app"):
+            return self.switch_exchange_now(target_exchange_id, target_provider)
+
+        if self.exchange_menu is not None:
+            self.exchange_menu.configure(state="disabled")
+        self.update_scan_status(f"Loading {target_provider.display_name}...", MUTED_TEXT_COLOR)
+        threading.Thread(
+            target=self.prepare_exchange_switch,
+            args=(target_exchange_id, target_provider),
+            name="SmartTradeExchangeLoader",
+            daemon=True
+        ).start()
+        return True
+
+    def prepare_exchange_switch(self, target_exchange_id, target_provider):
+
+        try:
+            prepared = self.load_exchange_symbols(target_exchange_id, target_provider)
+        except Exception as error:
+            self.app.after(
+                0, lambda: self.finish_exchange_switch_error(target_provider, error)
+            )
+            return
+        self.app.after(
+            0,
+            lambda: self.apply_exchange_switch(
+                target_exchange_id, target_provider, *prepared
+            )
+        )
+
+    def load_exchange_symbols(self, target_exchange_id, target_provider):
+
+        instruments = [
+            item for item in target_provider.get_instruments(force=True)
+            if self.instrument_matches_exchange(item, target_exchange_id)
+        ]
+        instrument_by_symbol = {item.exchange_symbol: item for item in instruments}
+        if self.scan_mode == SCAN_MODE_WATCHLIST:
+            symbols = self.filter_provider_symbols(
+                get_watchlist(target_exchange_id),
+                exchange_id=target_exchange_id,
+                instrument_by_symbol=instrument_by_symbol,
+            )
+            if not symbols:
+                defaults = target_provider.get_top_symbols(20)
+                save_watchlist(defaults, exchange_id=target_exchange_id)
+                symbols = [item.exchange_symbol for item in defaults]
+        else:
+            symbols = [
+                item.exchange_symbol
+                for item in target_provider.get_top_symbols(self.top_bybit_limit)
+            ]
+        if not symbols:
+            raise RuntimeError("The exchange returned an empty scan list.")
+        return instrument_by_symbol, symbols
+
+    def switch_exchange_now(self, target_exchange_id, target_provider):
+
+        try:
+            prepared = self.load_exchange_symbols(target_exchange_id, target_provider)
+        except Exception as error:
+            self.finish_exchange_switch_error(target_provider, error)
+            return False
+        self.apply_exchange_switch(target_exchange_id, target_provider, *prepared)
+        return True
+
+    def finish_exchange_switch_error(self, target_provider, error):
+
+        if self.exchange_menu is not None:
+            self.exchange_menu.configure(state="normal")
+            self.exchange_menu.set(self.active_exchange_option())
+        message = f"Could not switch to {target_provider.display_name}.\n\n{error}"
+        self.update_scan_status(f"{target_provider.display_name} connection error", RED)
+        messagebox.showerror(APP_TITLE, message)
+
+    def apply_exchange_switch(
+        self, target_exchange_id, target_provider, instrument_by_symbol, symbols
+    ):
+
+        self.cancel_scan_loop()
+        self.active_exchange_id = target_exchange_id
+        self.instrument_by_symbol = instrument_by_symbol
+        self.selected_symbol = None
+        if self.scan_mode == SCAN_MODE_WATCHLIST:
+            self.watchlist_symbols = symbols
+        else:
+            self.top50_symbols = symbols
+        self.coins = [{"symbol": symbol} for symbol in symbols]
+        self.reset_scan_state_for_new_run()
+        self.begin_scan_generation(symbols)
+        self.clear_watchlist_cards()
+        self.build_watchlist_cards()
+        self.update_scan_mode_buttons()
+        self.update_open_chart_status(current_polish_time())
+        self.update_scan_status(f"SCAN: {target_provider.display_name}", GREEN)
+        self.update_scan_progress(None, 0, len(symbols))
+        if self.exchange_menu is not None:
+            self.exchange_menu.configure(state="normal")
+            self.exchange_menu.set(self.active_exchange_option())
+        self.schedule_scan_loop(0)
+
+    def display_symbol(self, exchange_symbol):
+
+        instrument = getattr(self, "instrument_by_symbol", {}).get(exchange_symbol)
+        return instrument.display_symbol if instrument is not None else exchange_symbol
+
+    def platform_market_name(self, exchange_symbol):
+
+        instrument = getattr(self, "instrument_by_symbol", {}).get(exchange_symbol)
+        if instrument is not None and instrument.platform_market_name:
+            return instrument.platform_market_name
+        return self.display_symbol(exchange_symbol)
+
+    def asset_class(self, exchange_symbol):
+
+        instrument = getattr(self, "instrument_by_symbol", {}).get(exchange_symbol)
+        return instrument.asset_class if instrument is not None else "other"
+
+    def asset_class_label(self, exchange_symbol):
+
+        return self.asset_class(exchange_symbol).upper()
+
+    def market_badge(self, exchange_symbol=None):
+
+        badge = {
+            "bybit": "BYBIT",
+            "okx": "OKX PERP",
+            "okx_spot": "SPOT",
+        }.get(self.get_active_exchange_id(), self.active_provider().display_name.upper())
+        if exchange_symbol and self.get_active_exchange_id() == "okx":
+            return f"{badge} · {self.asset_class_label(exchange_symbol)}"
+        return badge
+
+    def market_label(self, exchange_id=None):
+
+        return {
+            "bybit": "Bybit Futures",
+            "okx": "OKX Perpetual",
+            "okx_spot": "OKX SPOT",
+        }.get(exchange_id or self.get_active_exchange_id(), self.active_provider().display_name)
+
+    def instrument_matches_exchange(self, instrument, exchange_id=None):
+
+        exchange_id = exchange_id or self.get_active_exchange_id()
+        if instrument.exchange_id != exchange_id:
+            return False
+        if exchange_id == "okx":
+            return (
+                instrument.instrument_type == "futures"
+                and instrument.metadata.get("instrument_scope") == "public_eea"
+                and instrument.metadata.get("ruleType") == "xperp"
+            )
+        if exchange_id == "okx_spot":
+            return (
+                instrument.instrument_type == "spot"
+                and not instrument.exchange_symbol.endswith("-SWAP")
+                and not instrument.platform_market_name.endswith(" UM")
+            )
+        return True
+
+    def filter_provider_symbols(
+        self, symbols, *, exchange_id=None, instrument_by_symbol=None
+    ):
+
+        exchange_id = exchange_id or self.get_active_exchange_id()
+        instrument_by_symbol = (
+            instrument_by_symbol
+            if instrument_by_symbol is not None
+            else getattr(self, "instrument_by_symbol", {})
+        )
+        if exchange_id not in ("okx", "okx_spot") or not instrument_by_symbol:
+            return list(symbols)
+        return [
+            symbol for symbol in symbols
+            if symbol in instrument_by_symbol
+            and self.instrument_matches_exchange(
+                instrument_by_symbol[symbol], exchange_id
+            )
+        ]
+
+    def fetch_klines(self, symbol, interval, exchange_id=None):
+
+        exchange_id = exchange_id or self.get_active_exchange_id()
+        try:
+            return get_klines(symbol, interval=interval, exchange_id=exchange_id)
+        except TypeError as error:
+            # Compatibility for tests/extensions still providing the legacy 2-argument hook.
+            if exchange_id == "bybit" and "exchange_id" in str(error):
+                return get_klines(symbol, interval=interval)
+            raise
+
     def perf_log(self, label, started_at, **fields):
 
         if not PERF_DEBUG:
@@ -262,7 +486,7 @@ class SmartTradeUI:
     def select_coin(self, symbol):
 
         self.selected_symbol = symbol
-        self.alert_manager.mark_opened_for_symbol(symbol)
+        self.alert_manager.mark_opened_for_symbol(symbol, self.get_active_exchange_id())
 
         self.refresh_selected()
 
@@ -272,10 +496,7 @@ class SmartTradeUI:
             return
 
         fetch_started_at = time.perf_counter()
-        df = get_klines(
-            self.selected_symbol,
-            interval=self.selected_interval
-        )
+        df = self.fetch_klines(self.selected_symbol, self.selected_interval)
         self.perf_log(
             "chart_fetch",
             fetch_started_at,
@@ -284,6 +505,13 @@ class SmartTradeUI:
         )
         df.attrs["symbol"] = self.selected_symbol
         df.attrs["timeframe"] = self.selected_interval
+        df.attrs["display_symbol"] = self.display_symbol(self.selected_symbol)
+        df.attrs["platform_market_name"] = self.platform_market_name(
+            self.selected_symbol
+        )
+        df.attrs["exchange_id"] = self.get_active_exchange_id()
+        df.attrs["exchange_name"] = self.market_label()
+        df.attrs["asset_class"] = self.asset_class(self.selected_symbol)
 
         chart_started_at = time.perf_counter()
         self.chart.set_candles(df)
@@ -334,7 +562,12 @@ class SmartTradeUI:
                     interval=job["interval"],
                     total_symbols=job["total_symbols"],
                     job_id=job["job_id"],
-                    scan_range=job["scan_range"]
+                    scan_range=job["scan_range"],
+                    exchange_id=job["exchange_id"],
+                    display_symbol=job["display_symbol"],
+                    market_label=job["market_label"],
+                    platform_market_name=job["platform_market_name"],
+                    asset_class=job["asset_class"]
                 )
             except Exception as error:
                 result = self.create_scan_result_record(
@@ -345,7 +578,12 @@ class SmartTradeUI:
                     interval=job["interval"],
                     total_symbols=job["total_symbols"],
                     job_id=job["job_id"],
-                    scan_range=job["scan_range"]
+                    scan_range=job["scan_range"],
+                    exchange_id=job["exchange_id"],
+                    display_symbol=job["display_symbol"],
+                    market_label=job["market_label"],
+                    platform_market_name=job["platform_market_name"],
+                    asset_class=job["asset_class"]
                 )
                 result["error"] = f"{type(error).__name__}: {error}"
 
@@ -387,13 +625,27 @@ class SmartTradeUI:
         interval=None,
         total_symbols=0,
         job_id=None,
-        scan_range=None
+        scan_range=None,
+        exchange_id=None,
+        display_symbol=None,
+        market_label=None,
+        platform_market_name=None,
+        asset_class=None
     ):
 
+        exchange_id = exchange_id or self.get_active_exchange_id()
         return {
             "scan_id": scan_id,
+            "exchange_id": exchange_id,
             "job_id": job_id,
             "symbol": symbol,
+            "exchange_symbol": symbol,
+            "display_symbol": display_symbol or self.display_symbol(symbol),
+            "platform_market_name": (
+                platform_market_name or self.platform_market_name(symbol)
+            ),
+            "market_label": market_label or self.market_label(exchange_id),
+            "asset_class": asset_class or self.asset_class(symbol),
             "interval": interval,
             "index": index,
             "total_symbols": total_symbols,
@@ -451,7 +703,12 @@ class SmartTradeUI:
             "interval": self.selected_interval,
             "index": index,
             "total_symbols": total_symbols,
-            "scan_range": self.get_alert_scan_range()
+            "scan_range": self.get_alert_scan_range(),
+            "exchange_id": self.get_active_exchange_id(),
+            "display_symbol": self.display_symbol(symbol),
+            "market_label": self.market_label(),
+            "platform_market_name": self.platform_market_name(symbol),
+            "asset_class": self.asset_class(symbol)
         }
 
         with self.scan_job_lock:
@@ -497,7 +754,15 @@ class SmartTradeUI:
             self.active_scan_job_id = None
             self.scan_worker_busy = False
 
-        if result.get("scan_id") != self.current_scan_id:
+        exchange_symbol = result.get("exchange_symbol", result.get("symbol"))
+        active_symbols = getattr(self, "current_scan_symbols", [])
+        active_instruments = getattr(self, "instrument_by_symbol", {})
+        if (
+            result.get("scan_id") != self.current_scan_id
+            or result.get("exchange_id", DEFAULT_EXCHANGE_ID) != self.get_active_exchange_id()
+            or (active_symbols and exchange_symbol not in active_symbols)
+            or (active_instruments and exchange_symbol not in active_instruments)
+        ):
             if is_active_job:
                 self.schedule_scan_loop(0)
             return False
@@ -519,6 +784,12 @@ class SmartTradeUI:
             if self.is_top_bybit_mode():
                 self.top50_results[symbol] = {
                     "symbol": symbol,
+                    "exchange_id": result["exchange_id"],
+                    "exchange_symbol": result["exchange_symbol"],
+                    "display_symbol": result["display_symbol"],
+                    "platform_market_name": result["platform_market_name"],
+                    "market_label": result["market_label"],
+                    "asset_class": result["asset_class"],
                     "rsi": result["rsi"],
                     "divergence": result["divergence"],
                     "candle_count": result["candle_count"]
@@ -539,7 +810,8 @@ class SmartTradeUI:
                 result["candle_count"],
                 ui_ready=ui_ready,
                 interval=result["interval"],
-                scan_range=result["scan_range"]
+                scan_range=result["scan_range"],
+                exchange_id=result["exchange_id"]
             )
 
         self.refresh_index, completed_cycle = next_scan_index(
@@ -621,7 +893,10 @@ class SmartTradeUI:
 
     def scan_now(self):
 
-        self.update_scan_status(SCAN_LOADING_BYBIT, MUTED_TEXT_COLOR)
+        self.update_scan_status(
+            f"SCAN: loading {self.active_provider().display_name}...",
+            MUTED_TEXT_COLOR
+        )
         prepared = self.prepare_scan_queue_for_restart()
 
         if not prepared:
@@ -648,7 +923,9 @@ class SmartTradeUI:
     def reload_scan_queue(self):
 
         if self.scan_mode == SCAN_MODE_WATCHLIST:
-            self.watchlist_symbols = get_watchlist()
+            self.watchlist_symbols = self.filter_provider_symbols(
+                get_watchlist(self.get_active_exchange_id())
+            )
             self.coins = [{"symbol": symbol} for symbol in self.watchlist_symbols]
             return
 
@@ -658,7 +935,9 @@ class SmartTradeUI:
 
         try:
             if self.scan_mode == SCAN_MODE_WATCHLIST:
-                symbols = get_watchlist()
+                symbols = self.filter_provider_symbols(
+                    get_watchlist(self.get_active_exchange_id())
+                )
 
                 if not symbols:
                     self.show_scan_connection_error(WATCHLIST_EMPTY)
@@ -668,23 +947,37 @@ class SmartTradeUI:
                 self.coins = [{"symbol": symbol} for symbol in symbols]
                 return True
 
-            symbols = get_top_bybit_symbols(self.top_bybit_limit)
+            if self.get_active_exchange_id() == "bybit":
+                symbols = get_top_bybit_symbols(self.top_bybit_limit)
+            else:
+                symbols = [
+                    item.exchange_symbol
+                    for item in get_top_symbols(
+                        self.get_active_exchange_id(), self.top_bybit_limit
+                    )
+                ]
 
         except Exception as error:
             self.show_scan_connection_error(
-                BYBIT_FETCH_TOP_ERROR.format(limit=self.top_bybit_limit, error=error)
+                f"Could not fetch Top {self.top_bybit_limit} "
+                f"{self.active_provider().display_name}: {error}"
             )
             return False
 
         if not symbols:
-            last_error = get_top_bybit_last_error()
+            last_error = (
+                get_top_bybit_last_error()
+                if self.get_active_exchange_id() == "bybit" else None
+            )
             if last_error is not None:
                 self.show_scan_connection_error(
-                    BYBIT_FETCH_TOP_ERROR.format(limit=self.top_bybit_limit, error=last_error)
+                    f"Could not fetch Top {self.top_bybit_limit} "
+                    f"{self.active_provider().display_name}: {last_error}"
                 )
             else:
                 self.show_scan_connection_error(
-                    BYBIT_FETCH_TOP_EMPTY.format(limit=self.top_bybit_limit)
+                    f"{self.active_provider().display_name} returned no Top "
+                    f"{self.top_bybit_limit} symbols."
                 )
             return False
 
@@ -694,8 +987,12 @@ class SmartTradeUI:
 
     def show_scan_connection_error(self, message):
 
-        print(f"Bybit connection error: {message}")
-        self.update_scan_status("Bybit connection error", RED)
+        exchange_label = (
+            "Bybit" if self.get_active_exchange_id() == "bybit"
+            else self.active_provider().display_name
+        )
+        print(f"{exchange_label} connection error: {message}")
+        self.update_scan_status(f"{exchange_label} connection error", RED)
         messagebox.showerror(APP_TITLE, message)
 
     def update_scan_status(self, text, color=MUTED_TEXT_COLOR):
@@ -803,7 +1100,9 @@ class SmartTradeUI:
             self.top_bybit_limit = self.get_top_bybit_limit()
             self.load_top50_scan_symbols()
         else:
-            self.watchlist_symbols = get_watchlist()
+            self.watchlist_symbols = self.filter_provider_symbols(
+                get_watchlist(self.get_active_exchange_id())
+            )
             self.coins = [{"symbol": coin} for coin in self.watchlist_symbols]
 
         self.update_scan_mode_buttons()
@@ -813,12 +1112,24 @@ class SmartTradeUI:
 
     def load_top50_scan_symbols(self):
 
-        symbols = get_top_bybit_symbols(self.top_bybit_limit)
+        if self.get_active_exchange_id() == "bybit":
+            symbols = get_top_bybit_symbols(self.top_bybit_limit)
+        else:
+            try:
+                symbols = [
+                    item.exchange_symbol
+                    for item in get_top_symbols(
+                        self.get_active_exchange_id(), self.top_bybit_limit
+                    )
+                ]
+            except Exception:
+                symbols = []
 
         if not symbols:
             messagebox.showwarning(
                 APP_TITLE,
-                BYBIT_TOP_WARNING.format(limit=self.top_bybit_limit)
+                f"Could not fetch Top {self.top_bybit_limit} "
+                f"{self.active_provider().display_name}. Try again in a moment."
             )
 
         self.top50_symbols = symbols
@@ -864,12 +1175,20 @@ class SmartTradeUI:
                 )
 
         if self.watchlist_title_label is not None:
-            title = "WATCHLIST" if self.scan_mode == SCAN_MODE_WATCHLIST else f"TOP {self.top_bybit_limit} BYBIT"
+            title = (
+                "WATCHLIST"
+                if self.scan_mode == SCAN_MODE_WATCHLIST
+                else f"TOP {self.top_bybit_limit} {self.active_provider().display_name.upper()}"
+            )
             self.watchlist_title_label.configure(text=title)
 
         if self.reset_watchlist_button is not None:
             if self.scan_mode == SCAN_MODE_WATCHLIST:
-                self.reset_watchlist_button.configure(state="normal", text_color=TEXT_COLOR)
+                self.reset_watchlist_button.configure(
+                    state="normal",
+                    text=f"Reset to Top20 {self.active_provider().display_name}",
+                    text_color=TEXT_COLOR
+                )
             else:
                 self.reset_watchlist_button.configure(state="disabled", text_color=GRAY)
 
@@ -906,7 +1225,12 @@ class SmartTradeUI:
         interval=None,
         total_symbols=0,
         job_id=None,
-        scan_range=None
+        scan_range=None,
+        exchange_id=None,
+        display_symbol=None,
+        market_label=None,
+        platform_market_name=None,
+        asset_class=None
     ):
 
         symbol = coin["symbol"]
@@ -920,15 +1244,21 @@ class SmartTradeUI:
             interval=interval,
             total_symbols=total_symbols,
             job_id=job_id,
-            scan_range=scan_range
+            scan_range=scan_range,
+            exchange_id=exchange_id,
+            display_symbol=display_symbol,
+            market_label=market_label,
+            platform_market_name=platform_market_name,
+            asset_class=asset_class
         )
 
         try:
             fetch_started_at = time.perf_counter()
-            df = get_klines(symbol, interval=interval)
+            df = self.fetch_klines(symbol, interval, exchange_id=exchange_id)
             self.perf_log("fetch_klines", fetch_started_at, symbol=symbol)
             df.attrs["symbol"] = symbol
             df.attrs["timeframe"] = interval
+            df.attrs["exchange_id"] = exchange_id or self.get_active_exchange_id()
 
             rsi_started_at = time.perf_counter()
             rsi = calculate_rsi(df)
@@ -1264,9 +1594,10 @@ class SmartTradeUI:
 
         rsi_text = self.format_rsi_text(rsi)
         rsi_color = self.rsi_value_color(rsi)
+        shown_symbol = self.platform_market_name(symbol)
         card_text = {
-            "symbol": symbol,
-            "market": "USDT Perpetual",
+            "symbol": shown_symbol,
+            "market": self.market_badge(symbol),
             "status": status,
             "status_color": status_color,
             "setup": setup_text,
@@ -1285,7 +1616,7 @@ class SmartTradeUI:
 
         self.last_card_texts[cache_key] = card_text
 
-        self.configure_label_if_changed(card["symbol"], text=symbol)
+        self.configure_label_if_changed(card["symbol"], text=shown_symbol)
         self.configure_card_label_if_present(card, "market", text=card_text["market"])
         self.configure_label_if_changed(
             card["status"],
@@ -1520,13 +1851,28 @@ class SmartTradeUI:
 
         identity = ctk.CTkFrame(frame, fg_color="transparent")
         identity.grid(row=0, column=0, rowspan=2, sticky="nsew", padx=(10, 4), pady=6)
-        identity.grid_columnconfigure(0, weight=1)
+        identity.grid_columnconfigure(1, weight=1)
 
-        symbol_label = self.create_card_label(identity, symbol, 14, TEXT_COLOR, True)
-        symbol_label.grid(row=0, column=0, sticky="ew")
+        identity_font_size = 14
+        position_label = self.create_card_label(
+            identity, str(index + 1), identity_font_size, MUTED_TEXT_COLOR, True
+        )
+        position_label.configure(width=30, anchor="e")
+        position_label.grid(row=0, column=0, rowspan=2, sticky="nw", padx=(0, 5))
 
-        market_label = self.create_card_label(identity, "USDT Perpetual", 10, MUTED_TEXT_COLOR, False)
-        market_label.grid(row=1, column=0, sticky="ew", pady=(0, 1))
+        symbol_label = self.create_card_label(
+            identity,
+            self.platform_market_name(symbol),
+            identity_font_size,
+            TEXT_COLOR,
+            True
+        )
+        symbol_label.grid(row=0, column=1, sticky="ew")
+
+        market_label = self.create_card_label(
+            identity, self.market_badge(symbol), 10, MUTED_TEXT_COLOR, False
+        )
+        market_label.grid(row=1, column=1, sticky="ew", pady=(0, 1))
 
         if editable:
             edit_button = ctk.CTkButton(
@@ -1542,9 +1888,10 @@ class SmartTradeUI:
                 corner_radius=6,
                 command=lambda card_index=index: self.open_coin_selector(card_index)
             )
-            edit_button.grid(row=0, column=1, rowspan=2, sticky="e", padx=(4, 0))
+            edit_button.grid(row=0, column=2, rowspan=2, sticky="e", padx=(4, 0))
 
         labels = {
+            "position": position_label,
             "symbol": symbol_label,
             "market": market_label,
             "setup": self.create_card_value(frame, 1, "SETUP", "—", MUTED_TEXT_COLOR),
@@ -1561,6 +1908,12 @@ class SmartTradeUI:
 
         labels["frame"] = frame
         labels["symbol_value"] = symbol
+        labels["exchange_id"] = self.get_active_exchange_id()
+        labels["exchange_symbol"] = symbol
+        labels["display_symbol"] = self.display_symbol(symbol)
+        labels["platform_market_name"] = self.platform_market_name(symbol)
+        labels["market_label"] = self.market_label()
+        labels["asset_class"] = self.asset_class(symbol)
         return labels
 
     def create_card_value(self, parent, column, title, value, color):
@@ -1615,7 +1968,11 @@ class SmartTradeUI:
         current_symbol = self.coins[index]["symbol"]
 
         try:
-            symbols = get_all_bybit_symbols()
+            instruments = get_instruments(self.get_active_exchange_id())
+            self.instrument_by_symbol = {
+                item.exchange_symbol: item for item in instruments
+            }
+            symbols = instruments
         except Exception as error:
             messagebox.showerror(
                 APP_TITLE,
@@ -1676,7 +2033,10 @@ class SmartTradeUI:
 
         def render_symbols(*_args):
             query = search_var.get().strip()
-            filtered_symbols = filter_symbols(symbols, query)
+            filtered_symbols = [
+                item for item in filter_symbols(symbols, query)
+                if self.instrument_matches_exchange(item)
+            ]
 
             for child in scroll.winfo_children():
                 child.destroy()
@@ -1690,10 +2050,15 @@ class SmartTradeUI:
                 ).pack(fill="x", padx=6, pady=10)
                 return
 
-            for symbol in filtered_symbols:
+            for instrument in filtered_symbols:
                 button = ctk.CTkButton(
                     scroll,
-                    text=symbol,
+                    text=(
+                        f"{instrument.platform_market_name or instrument.display_symbol}"
+                        f" · {instrument.asset_class.upper()}"
+                        if instrument.exchange_id == "okx"
+                        else instrument.platform_market_name or instrument.display_symbol
+                    ),
                     height=34,
                     fg_color=BG_COLOR,
                     hover_color=BORDER_COLOR,
@@ -1701,7 +2066,7 @@ class SmartTradeUI:
                     border_width=1,
                     text_color=TEXT_COLOR,
                     corner_radius=6,
-                    command=lambda value=symbol, dialog=window: self.replace_watchlist_coin(
+                    command=lambda value=instrument.exchange_symbol, dialog=window: self.replace_watchlist_coin(
                         index,
                         value,
                         dialog
@@ -1720,7 +2085,10 @@ class SmartTradeUI:
         updated_symbols[index] = new_symbol
 
         try:
-            save_watchlist(updated_symbols)
+            save_watchlist(
+                [self.instrument_by_symbol.get(symbol, symbol) for symbol in updated_symbols],
+                exchange_id=self.get_active_exchange_id(),
+            )
         except Exception as error:
             messagebox.showerror(
                 APP_TITLE,
@@ -1741,14 +2109,15 @@ class SmartTradeUI:
 
         confirmed = messagebox.askyesno(
             APP_TITLE,
-            WATCHLIST_RESET_CONFIRM
+            f"Replace the {self.active_provider().display_name} watchlist with "
+            "the current Top20 by 24h turnover?"
         )
 
         if not confirmed:
             return
 
         try:
-            reset_watchlist()
+            reset_watchlist(self.get_active_exchange_id())
         except Exception as error:
             messagebox.showerror(
                 APP_TITLE,
@@ -1762,7 +2131,9 @@ class SmartTradeUI:
     def reload_watchlist(self):
 
         self.cancel_scan_loop()
-        self.watchlist_symbols = get_watchlist()
+        self.watchlist_symbols = self.filter_provider_symbols(
+            get_watchlist(self.active_exchange_id)
+        )
 
         if self.scan_mode == SCAN_MODE_WATCHLIST:
             self.coins = [{"symbol": coin} for coin in self.watchlist_symbols]
@@ -1812,6 +2183,27 @@ class SmartTradeUI:
                         result["divergence"],
                         result["candle_count"]
                     )
+
+        self.refresh_card_positions()
+
+    def refresh_card_positions(self):
+
+        position = 0
+        for card in getattr(self, "buttons", []):
+            frame = card.get("frame")
+            if frame is None:
+                continue
+
+            try:
+                if not frame.winfo_manager():
+                    continue
+            except AttributeError:
+                pass
+
+            position += 1
+            self.configure_card_label_if_present(
+                card, "position", text=str(position)
+            )
 
     def sort_top50_cards(self):
 
@@ -1964,6 +2356,8 @@ class SmartTradeUI:
                     result["candle_count"]
                 )
 
+        self.refresh_card_positions()
+
     def build_scan_mode_controls(self, parent):
 
         container = ctk.CTkFrame(parent, fg_color="transparent")
@@ -1981,7 +2375,7 @@ class SmartTradeUI:
 
         modes = [
             (SCAN_MODE_WATCHLIST, "Watchlist"),
-            (SCAN_MODE_TOP_BYBIT, "Top Bybit")
+            (SCAN_MODE_TOP_BYBIT, "Top Market")
         ]
 
         for mode, label in modes:
@@ -2004,7 +2398,7 @@ class SmartTradeUI:
 
         ctk.CTkLabel(
             self.top_limit_container,
-            text="TOP BYBIT RANGE",
+            text="TOP RANGE",
             font=("Arial", 11, "bold"),
             text_color=MUTED_TEXT_COLOR
         ).pack(anchor="w", pady=(0, 4))
@@ -2029,6 +2423,34 @@ class SmartTradeUI:
             self.top_limit_buttons[limit] = button
 
         self.update_scan_mode_buttons()
+
+    def build_exchange_controls(self, parent):
+
+        container = ctk.CTkFrame(parent, fg_color="transparent")
+        container.pack(fill="x", padx=8, pady=(10, 8))
+
+        ctk.CTkLabel(
+            container,
+            text="EXCHANGE",
+            font=("Arial", 11, "bold"),
+            text_color=MUTED_TEXT_COLOR
+        ).pack(anchor="w", pady=(0, 4))
+
+        self.exchange_menu = ctk.CTkOptionMenu(
+            container,
+            values=list(EXCHANGE_OPTIONS),
+            command=self.select_exchange,
+            height=30,
+            fg_color=BORDER_COLOR,
+            button_color=PANEL_COLOR,
+            button_hover_color=BORDER_COLOR,
+            dropdown_fg_color=PANEL_COLOR,
+            dropdown_hover_color=BORDER_COLOR,
+            dropdown_text_color=TEXT_COLOR,
+            text_color=TEXT_COLOR
+        )
+        self.exchange_menu.set(self.active_exchange_option())
+        self.exchange_menu.pack(fill="x")
 
     def open_guide_dialog(self):
 
@@ -2212,7 +2634,15 @@ class SmartTradeUI:
         if self.open_chart_label is not None:
             self.configure_label_if_changed(
                 self.open_chart_label,
-                text=OPEN_CHART.format(symbol=self.selected_symbol or "-")
+                text=(
+                    f"Open: {self.platform_market_name(self.selected_symbol)} · "
+                    f"{self.market_label()}"
+                    f" · {self.asset_class_label(self.selected_symbol)}"
+                    if self.selected_symbol and self.get_active_exchange_id() == "okx"
+                    else f"Open: {self.platform_market_name(self.selected_symbol)} · "
+                    f"{self.market_label()}"
+                    if self.selected_symbol else OPEN_CHART_EMPTY
+                )
             )
 
     def interval_label(self, interval):
@@ -2244,7 +2674,8 @@ class SmartTradeUI:
         *,
         ui_ready=True,
         interval=None,
-        scan_range=None
+        scan_range=None,
+        exchange_id=None
     ):
 
         if divergence is None or not ui_ready:
@@ -2261,7 +2692,8 @@ class SmartTradeUI:
             divergence,
             status,
             age_text,
-            quality_score=quality_score
+            quality_score=quality_score,
+            exchange_id=exchange_id or self.get_active_exchange_id()
         )
         self.update_alert_status_labels()
         return sent
@@ -2577,6 +3009,8 @@ class SmartTradeUI:
 
         left_controls = ctk.CTkFrame(self.left, fg_color="transparent")
         left_controls.pack(fill="x")
+
+        self.build_exchange_controls(left_controls)
 
         self.watchlist_title_label = ctk.CTkLabel(
             left_controls,

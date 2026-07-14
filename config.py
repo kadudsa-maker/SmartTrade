@@ -32,6 +32,8 @@ SYMBOL_SEARCH_LIMIT = 100
 DEFAULT_KLINE_LIMIT = 300
 DEFAULT_WATCHLIST_LIMIT = 20
 KLINE_CACHE_TTL = 30
+OKX_BASE_URL = "https://www.okx.com"
+OKX_EEA_BASE_URL = "https://eea.okx.com"
 PERF_DEBUG = False
 # Distance Score preferuje zwarte dywergencje; zbyt długie układy są karane niższym wynikiem.
 DISTANCE_PROFILE = {
