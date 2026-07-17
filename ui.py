@@ -2,7 +2,7 @@ import customtkinter as ctk
 from queue import Empty, Queue
 import threading
 import time
-from tkinter import BooleanVar, StringVar, messagebox
+from tkinter import BooleanVar, StringVar, TclError, messagebox
 
 from alerts import AlertManager
 from app_paths import configure_windows_window_icon
@@ -21,6 +21,7 @@ from config import (
     TOP_SORT_INTERVAL_MS
 )
 from divergence import find_regular_divergences
+from fvg import Candle, FVGDirection, FVGOpportunityStatus, FVGService
 from market import (
     calculate_rsi,
     filter_symbols,
@@ -129,6 +130,15 @@ DEFAULT_TIMEFRAME = "60"
 DEFAULT_RSI_VIEW_OPTION = RSI_VIEW_ON
 DEFAULT_RSI_SORT_MODE = RSI_SORT_MODE_QUALITY
 DEFAULT_EXCHANGE_ID = "bybit"
+FVG_INTERVAL_SECONDS = {
+    "1": 60,
+    "5": 5 * 60,
+    "15": 15 * 60,
+    "30": 30 * 60,
+    "60": 60 * 60,
+    "240": 4 * 60 * 60,
+    "D": 24 * 60 * 60,
+}
 EXCHANGE_OPTIONS = {
     "Bybit Futures": "bybit",
     "OKX Perpetual": "okx",
@@ -327,6 +337,7 @@ class SmartTradeUI:
         self.active_exchange_id = target_exchange_id
         self.instrument_by_symbol = instrument_by_symbol
         self.selected_symbol = None
+        self.clear_chart_fvg()
         if self.scan_mode == SCAN_MODE_WATCHLIST:
             self.watchlist_symbols = symbols
         else:
@@ -454,6 +465,8 @@ class SmartTradeUI:
     def select_timeframe(self, interval):
 
         self.cancel_scan_loop()
+        self.clear_fvg_card_sections()
+        self.clear_chart_fvg()
         self.selected_interval = interval
         self.refresh_index = 0
         self.top50_results = {}
@@ -485,6 +498,7 @@ class SmartTradeUI:
 
     def select_coin(self, symbol):
 
+        self.clear_chart_fvg()
         self.selected_symbol = symbol
         self.alert_manager.mark_opened_for_symbol(symbol, self.get_active_exchange_id())
 
@@ -513,8 +527,13 @@ class SmartTradeUI:
         df.attrs["exchange_name"] = self.market_label()
         df.attrs["asset_class"] = self.asset_class(self.selected_symbol)
 
+        chart_fvg_gaps = self.resolve_chart_fvg_gaps(
+            df,
+            self.selected_symbol,
+            self.selected_interval,
+        )
         chart_started_at = time.perf_counter()
-        self.chart.set_candles(df)
+        self.chart.set_candles(df, fvg_gaps=chart_fvg_gaps)
         self.perf_log(
             "chart_set_candles",
             chart_started_at,
@@ -522,6 +541,66 @@ class SmartTradeUI:
             timeframe=self.selected_interval
         )
         self.update_open_chart_status(current_polish_time())
+
+    def matching_chart_scan_record(self, symbol, interval):
+
+        record = getattr(self, "current_scan_results", {}).get(symbol)
+        if record is None:
+            return None
+
+        exchange_symbol = record.get("exchange_symbol", record.get("symbol"))
+        if (
+            record.get("scan_id") != getattr(self, "current_scan_id", None)
+            or record.get("exchange_id") != self.get_active_exchange_id()
+            or exchange_symbol != symbol
+            or record.get("interval") != interval
+            or record.get("market_label") != self.market_label()
+        ):
+            return None
+        return record
+
+    def resolve_chart_fvg_gaps(self, df, symbol, interval):
+
+        record = self.matching_chart_scan_record(symbol, interval)
+        if record is not None:
+            fvg_result = record.get("fvg_result")
+            return () if fvg_result is None else tuple(fvg_result.gaps)
+
+        try:
+            candles = self.prepare_engine_candles(df, interval=interval)
+            closed, current, previous = self.prepare_fvg_candles(candles, interval)
+            return tuple(FVGService().analyze(closed, current, previous).gaps)
+        except Exception as error:
+            print(
+                "FVG chart analysis error: "
+                f"symbol={symbol} "
+                f"exchange_id={self.get_active_exchange_id()} "
+                f"timeframe={interval} "
+                f"error_type={type(error).__name__} "
+                f"error_message={error}"
+            )
+            return ()
+
+    def clear_chart_fvg(self):
+
+        chart = getattr(self, "chart", None)
+        if chart is not None and hasattr(chart, "set_fvg_gaps"):
+            chart.set_fvg_gaps(())
+
+    def update_selected_chart_fvg(self, result):
+
+        symbol = result.get("exchange_symbol", result.get("symbol"))
+        if symbol != getattr(self, "selected_symbol", None):
+            return False
+        if self.matching_chart_scan_record(symbol, self.selected_interval) is not result:
+            return False
+
+        chart = getattr(self, "chart", None)
+        if chart is None or not hasattr(chart, "set_fvg_gaps"):
+            return False
+        fvg_result = result.get("fvg_result")
+        chart.set_fvg_gaps(() if fvg_result is None else fvg_result.gaps)
+        return True
 
     def initialize_scan_worker(self):
 
@@ -659,6 +738,9 @@ class SmartTradeUI:
             "alert_candidate": None,
             "scan_range": scan_range,
             "ui_visible": False,
+            "fvg_result": None,
+            "fvg_status": "",
+            "selected_fvg": None,
             "error": None,
             "worker_duration_ms": 0
         }
@@ -776,6 +858,7 @@ class SmartTradeUI:
             self.current_scan_rendered = 0
         self.current_scan_results[symbol] = result
         self.current_scan_rendered += 1
+        self.update_selected_chart_fvg(result)
 
         if result["status"] == "error":
             print(f"Scan symbol error: {symbol}: {result['error']}")
@@ -792,7 +875,10 @@ class SmartTradeUI:
                     "asset_class": result["asset_class"],
                     "rsi": result["rsi"],
                     "divergence": result["divergence"],
-                    "candle_count": result["candle_count"]
+                    "candle_count": result["candle_count"],
+                    "fvg_result": result["fvg_result"],
+                    "fvg_status": result["fvg_status"],
+                    "selected_fvg": result["selected_fvg"]
                 }
                 ui_ready = self.update_top50_result_card(symbol)
             elif index < len(self.buttons):
@@ -801,7 +887,10 @@ class SmartTradeUI:
                     symbol,
                     result["rsi"],
                     result["divergence"],
-                    result["candle_count"]
+                    result["candle_count"],
+                    fvg_result=result["fvg_result"],
+                    fvg_status=result["fvg_status"],
+                    selected_fvg=result["selected_fvg"]
                 )
 
             self.process_alert_candidate(
@@ -1268,6 +1357,27 @@ class SmartTradeUI:
             candles = self.prepare_engine_candles(df, interval=interval)
             self.perf_log("prepare_candles", candles_started_at, symbol=symbol)
 
+            fvg_result = None
+            try:
+                fvg_closed, fvg_current, fvg_previous = self.prepare_fvg_candles(
+                    candles,
+                    interval,
+                )
+                fvg_result = FVGService().analyze(
+                    fvg_closed,
+                    fvg_current,
+                    fvg_previous,
+                )
+            except Exception as fvg_error:
+                print(
+                    "FVG analysis error: "
+                    f"symbol={symbol} "
+                    f"exchange_id={exchange_id or self.get_active_exchange_id()} "
+                    f"timeframe={interval} "
+                    f"error_type={type(fvg_error).__name__} "
+                    f"error_message={fvg_error}"
+                )
+
             divergence_started_at = time.perf_counter()
             divergences = self.find_coin_divergences_from_candles(candles)
             self.perf_log("find_divergences", divergence_started_at, symbol=symbol)
@@ -1296,7 +1406,14 @@ class SmartTradeUI:
                     "candles_ago": candles_ago,
                     "signal_status": signal_status,
                     "alert_candidate": best_divergence,
-                    "ui_visible": ui_visible
+                    "ui_visible": ui_visible,
+                    "fvg_result": fvg_result,
+                    "fvg_status": (
+                        fvg_result.status.value if fvg_result else ""
+                    ),
+                    "selected_fvg": (
+                        fvg_result.selected_fvg if fvg_result else None
+                    )
                 }
             )
         except Exception as error:
@@ -1554,7 +1671,132 @@ class SmartTradeUI:
 
         return True
 
-    def update_watchlist_card(self, index, symbol, rsi, divergence, candle_count):
+    @staticmethod
+    def format_fvg_price(value):
+
+        price = float(value)
+        magnitude = abs(price)
+
+        if magnitude >= 1000:
+            decimals = 2
+        elif magnitude >= 1:
+            decimals = 4
+        elif magnitude >= 0.01:
+            decimals = 6
+        else:
+            decimals = 8
+
+        formatted = f"{price:,.{decimals}f}"
+        integer, dot, fraction = formatted.partition(".")
+        fraction = fraction.rstrip("0")
+        formatted = integer if not fraction else f"{integer}{dot}{fraction}"
+        return formatted.replace(",", " ")
+
+    def format_fvg_card_content(self, fvg_result, fvg_status, selected_fvg):
+
+        if fvg_result is None or selected_fvg is None:
+            return None
+
+        status = getattr(fvg_status, "value", fvg_status)
+        if status not in (
+            FVGOpportunityStatus.ACTIVE.value,
+            FVGOpportunityStatus.PENDING.value,
+        ):
+            return None
+
+        try:
+            direction = selected_fvg.gap.direction
+            direction_value = getattr(direction, "value", direction)
+            if direction_value == FVGDirection.BULLISH.value:
+                direction_text = "Bullish"
+                direction_color = GREEN
+            elif direction_value == FVGDirection.BEARISH.value:
+                direction_text = "Bearish"
+                direction_color = RED
+            else:
+                return None
+
+            if status == FVGOpportunityStatus.ACTIVE.value:
+                detail = (
+                    f"{self.format_fvg_price(selected_fvg.gap.lower_price)} – "
+                    f"{self.format_fvg_price(selected_fvg.gap.upper_price)}"
+                )
+                detail_color = TEXT_COLOR
+            else:
+                distance = selected_fvg.distance_percent
+                detail = "" if distance is None else f"Distance: {distance:.2f}%"
+                detail_color = MUTED_TEXT_COLOR
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            return None
+
+        return {
+            "header": f"FVG {status} · {direction_text}",
+            "header_color": direction_color,
+            "detail": detail,
+            "detail_color": detail_color,
+        }
+
+    def update_fvg_card_section(
+        self, card, fvg_result=None, fvg_status="", selected_fvg=None
+    ):
+
+        cell = card.get("fvg_cell")
+        header = card.get("fvg_header")
+        detail = card.get("fvg_detail")
+        if cell is None or header is None or detail is None:
+            return False
+
+        try:
+            if hasattr(cell, "winfo_exists") and not cell.winfo_exists():
+                return False
+
+            content = self.format_fvg_card_content(
+                fvg_result, fvg_status, selected_fvg
+            )
+            if content is None:
+                self.configure_label_if_changed(header, text="")
+                self.configure_label_if_changed(detail, text="")
+                if cell.winfo_ismapped():
+                    cell.grid_remove()
+                return True
+
+            self.configure_label_if_changed(
+                header,
+                text=content["header"],
+                text_color=content["header_color"],
+            )
+            self.configure_label_if_changed(
+                detail,
+                text=content["detail"],
+                text_color=content["detail_color"],
+            )
+            if not cell.winfo_ismapped():
+                cell.grid()
+            return True
+        except (AttributeError, TclError) as error:
+            print(
+                "FVG card section update skipped: "
+                f"{type(error).__name__}: {error}"
+            )
+            return False
+
+    def clear_fvg_card_sections(self):
+
+        for card in getattr(self, "buttons", []):
+            self.update_fvg_card_section(card)
+
+    def update_watchlist_card(
+        self,
+        index,
+        symbol,
+        rsi,
+        divergence,
+        candle_count,
+        *,
+        fvg_result=None,
+        fvg_status="",
+        selected_fvg=None,
+    ):
 
         if index < 0 or index >= len(self.buttons):
             return False
@@ -1571,6 +1813,12 @@ class SmartTradeUI:
             pass
 
         self.bind_card_click(frame, symbol)
+        self.update_fvg_card_section(
+            card,
+            fvg_result=fvg_result,
+            fvg_status=fvg_status,
+            selected_fvg=selected_fvg,
+        )
 
         if divergence is None:
             status = ""
@@ -1826,6 +2074,34 @@ class SmartTradeUI:
 
         return candles.sort_values("time").reset_index(drop=True)
 
+    def prepare_fvg_candles(self, candles, interval, now_seconds=None):
+
+        fvg_candles = tuple(
+            Candle(
+                time=int(row.time),
+                open=float(row.open),
+                high=float(row.high),
+                low=float(row.low),
+                close=float(row.close),
+            )
+            for row in candles.itertuples(index=False)
+        )
+        if len(fvg_candles) < 2:
+            raise ValueError("FVG analysis requires at least two observations.")
+
+        try:
+            interval_seconds = FVG_INTERVAL_SECONDS[interval]
+        except KeyError as error:
+            raise ValueError(f"Unsupported FVG timeframe: {interval!r}.") from error
+
+        current_time = time.time() if now_seconds is None else float(now_seconds)
+        closed_candles = tuple(
+            candle
+            for candle in fvg_candles
+            if candle.time + interval_seconds <= current_time
+        )
+        return closed_candles, fvg_candles[-1], fvg_candles[-2]
+
     def calculate_rsi_series(self, close):
 
         return calculate_rsi_series(close, period=14)
@@ -1848,6 +2124,7 @@ class SmartTradeUI:
         frame.grid_columnconfigure(3, weight=0, minsize=48)
         frame.grid_columnconfigure(4, weight=0, minsize=74)
         frame.grid_columnconfigure(5, weight=0, minsize=62)
+        frame.grid_columnconfigure(6, weight=0)
 
         identity = ctk.CTkFrame(frame, fg_color="transparent")
         identity.grid(row=0, column=0, rowspan=2, sticky="nsew", padx=(10, 4), pady=6)
@@ -1902,6 +2179,10 @@ class SmartTradeUI:
         }
         labels["rsi"] = self.create_card_value(frame, 3, "RSI", "—", TEXT_COLOR)
         labels["rsi_cell"] = labels["rsi"].master
+        fvg_cell, fvg_header, fvg_detail = self.create_fvg_card_section(frame)
+        labels["fvg_cell"] = fvg_cell
+        labels["fvg_header"] = fvg_header
+        labels["fvg_detail"] = fvg_detail
         self.update_rsi_card_visibility(labels)
 
         self.bind_card_click(frame, symbol)
@@ -1915,6 +2196,39 @@ class SmartTradeUI:
         labels["market_label"] = self.market_label()
         labels["asset_class"] = self.asset_class(symbol)
         return labels
+
+    def create_fvg_card_section(self, parent):
+
+        cell = ctk.CTkFrame(parent, fg_color="transparent")
+        cell.grid(
+            row=0,
+            column=6,
+            rowspan=2,
+            sticky="nsew",
+            padx=(4, 8),
+            pady=6,
+        )
+        cell.grid_columnconfigure(0, weight=1)
+
+        header = ctk.CTkLabel(
+            cell,
+            text="",
+            font=("Arial", 9, "bold"),
+            text_color=MUTED_TEXT_COLOR,
+            anchor="w",
+        )
+        header.grid(row=0, column=0, sticky="ew")
+
+        detail = ctk.CTkLabel(
+            cell,
+            text="",
+            font=("Arial", 9, "normal"),
+            text_color=MUTED_TEXT_COLOR,
+            anchor="w",
+        )
+        detail.grid(row=1, column=0, sticky="ew", pady=(1, 0))
+        cell.grid_remove()
+        return cell, header, detail
 
     def create_card_value(self, parent, column, title, value, color):
 
@@ -2181,7 +2495,10 @@ class SmartTradeUI:
                         result["symbol"],
                         result["rsi"],
                         result["divergence"],
-                        result["candle_count"]
+                        result["candle_count"],
+                        fvg_result=result.get("fvg_result"),
+                        fvg_status=result.get("fvg_status", ""),
+                        selected_fvg=result.get("selected_fvg")
                     )
 
         self.refresh_card_positions()
@@ -2274,7 +2591,10 @@ class SmartTradeUI:
             result["symbol"],
             result["rsi"],
             result["divergence"],
-            result["candle_count"]
+            result["candle_count"],
+            fvg_result=result.get("fvg_result"),
+            fvg_status=result.get("fvg_status", ""),
+            selected_fvg=result.get("selected_fvg")
         )
 
     def build_top_scan_ranking(self):
@@ -2353,7 +2673,10 @@ class SmartTradeUI:
                     symbol,
                     result["rsi"],
                     result["divergence"],
-                    result["candle_count"]
+                    result["candle_count"],
+                    fvg_result=result.get("fvg_result"),
+                    fvg_status=result.get("fvg_status", ""),
+                    selected_fvg=result.get("selected_fvg")
                 )
 
         self.refresh_card_positions()

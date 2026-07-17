@@ -1,10 +1,12 @@
 import tkinter as tk
+from bisect import bisect_left
 
 import customtkinter as ctk
 import pandas as pd
 import plotly.graph_objects as go
 from config import ACTIVE_MAX_CANDLES, AGING_MAX_CANDLES, PIVOT_LEFT, PIVOT_RIGHT
 from divergence import find_regular_divergences
+from fvg.chart_overlay import FVGChartOverlay
 from pivots import find_pivots, find_rsi_pivots
 from rsi import calculate_rsi_series
 from signal_quality import calculate_quality_score
@@ -43,6 +45,8 @@ class SmartTradeChart:
         self.rsi_pivot_highs = []
         self.rsi_pivot_lows = []
         self.regular_divergences = []
+        self.fvg_gaps = ()
+        self.fvg_overlay = FVGChartOverlay()
         self._last_source_key = None
 
         self.canvas = tk.Canvas(
@@ -69,7 +73,13 @@ class SmartTradeChart:
 
         self.frame.grid(**kwargs)
 
-    def set_candles(self, df):
+    def set_candles(self, df, fvg_gaps=()):
+
+        fvg_gaps = tuple(fvg_gaps or ())
+        fvg_signature = tuple(
+            (self.fvg_overlay.zone_key(item), item.status.value)
+            for item in fvg_gaps
+        )
 
         source_key = (
             id(df),
@@ -78,13 +88,15 @@ class SmartTradeChart:
             df.attrs.get("symbol"),
             df.attrs.get("platform_market_name"),
             df.attrs.get("asset_class"),
-            df.attrs.get("timeframe")
+            df.attrs.get("timeframe"),
+            fvg_signature,
         )
 
         if source_key == self._last_source_key:
             return
 
         self.candles = self._prepare_candles(df)
+        self.fvg_gaps = fvg_gaps
         self.rsi_series = self._calculate_rsi(self.candles["close"])
         self.pivot_highs, self.pivot_lows = find_pivots(
             self.candles,
@@ -107,12 +119,33 @@ class SmartTradeChart:
         )
 
         if self.candles.empty:
+            self._update_figure()
+            self._draw()
             self._last_source_key = source_key
             return
 
         self._update_figure()
         self._draw()
         self._last_source_key = source_key
+
+    def set_fvg_gaps(self, fvg_gaps):
+
+        fvg_gaps = tuple(fvg_gaps or ())
+        old_signature = tuple(
+            (self.fvg_overlay.zone_key(item), item.status.value)
+            for item in self.fvg_gaps
+        )
+        new_signature = tuple(
+            (self.fvg_overlay.zone_key(item), item.status.value)
+            for item in fvg_gaps
+        )
+        if old_signature == new_signature:
+            return
+
+        self.fvg_gaps = fvg_gaps
+        self._last_source_key = None
+        self._update_figure()
+        self._draw()
 
     def _configure_figure(self):
 
@@ -136,6 +169,14 @@ class SmartTradeChart:
 
         if self.candles.empty:
             return
+
+        right_edge = int(self.candles["time"].iloc[-1])
+        self.fvg_overlay.add_plotly_shapes(
+            self.figure,
+            self.fvg_gaps,
+            right_edge,
+            time_converter=lambda value: pd.to_datetime(value, unit="s"),
+        )
 
         self.figure.add_trace(
             go.Candlestick(
@@ -414,6 +455,17 @@ class SmartTradeChart:
 
         self._draw_price_grid(width, price_top, price_bottom, padding)
         self._draw_rsi_grid(width, rsi_top, rsi_bottom, padding)
+        self._draw_fvg_zones(
+            visible_candles,
+            high,
+            low,
+            step,
+            padding,
+            width,
+            price_top,
+            price_bottom,
+            candle_area_height,
+        )
 
         for index, candle in visible_candles.iterrows():
             x = padding + (index * step) + (step / 2)
@@ -457,6 +509,46 @@ class SmartTradeChart:
             low,
             price_top,
             candle_area_height
+        )
+
+    def _draw_fvg_zones(
+        self,
+        visible_candles,
+        high,
+        low,
+        step,
+        padding,
+        width,
+        price_top,
+        price_bottom,
+        price_height,
+    ):
+
+        if not self.fvg_gaps or visible_candles.empty:
+            self.fvg_overlay.clear_canvas(self.canvas)
+            return
+
+        visible_times = [int(value) for value in visible_candles["time"]]
+
+        def time_to_x(timestamp):
+            timestamp = int(timestamp)
+            if timestamp < visible_times[0]:
+                return padding
+            position = bisect_left(visible_times, timestamp)
+            if position >= len(visible_times):
+                return width - padding
+            return padding + (position * step) + (step / 2)
+
+        self.fvg_overlay.draw_canvas_rectangles(
+            self.canvas,
+            self.fvg_gaps,
+            right_edge=visible_times[-1],
+            time_to_x=time_to_x,
+            price_to_y=lambda price: self._price_to_y(
+                price, high, low, price_top, price_height
+            ),
+            panel_bounds=(padding, price_top, width - padding, price_bottom),
+            right_edge_x=width - padding,
         )
 
     def _draw_empty_state(self):
