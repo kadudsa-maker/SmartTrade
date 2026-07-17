@@ -4,6 +4,7 @@ import pandas as pd
 
 import ui as ui_module
 from fvg import FVGOpportunityStatus, FVGService
+from fvg import diagnostics as fvg_diagnostics
 from ui import SmartTradeUI
 
 
@@ -23,6 +24,8 @@ def sample_frame():
 
 def build_worker_ui(frame=None):
     ui = SmartTradeUI.__new__(SmartTradeUI)
+    ui.fvg_enabled = True
+    ui.fvg_only_enabled = False
     ui.selected_interval = "1"
     ui.active_exchange_id = "bybit"
     ui.buttons = []
@@ -220,6 +223,8 @@ def test_open_candle_cannot_invalidate_gap_used_by_service():
 
 def build_apply_ui():
     ui = SmartTradeUI.__new__(SmartTradeUI)
+    ui.fvg_enabled = True
+    ui.fvg_only_enabled = False
     ui.ui_thread_id = threading.get_ident()
     ui.shutdown_requested = False
     ui.current_scan_id = 2
@@ -277,13 +282,64 @@ def test_exchange_and_timeframe_remain_owned_by_parent_scan_record():
 
     assert record["exchange_id"] == "okx_spot"
     assert record["interval"] == "15"
-    assert record["fvg_result"] is None
+    assert "fvg_result" not in record
 
 
 def test_default_record_has_no_visual_fvg_state():
     ui = build_worker_ui()
     record = ui.create_scan_result_record(1, "BTCUSDT", 0, "pending")
 
-    assert record["fvg_result"] is None
-    assert record["fvg_status"] == ""
-    assert record["selected_fvg"] is None
+    assert "fvg_result" not in record
+    assert "fvg_status" not in record
+    assert "selected_fvg" not in record
+
+
+def test_diagnostics_write_error_preserves_scan_divergence_and_quality(
+    monkeypatch, tmp_path
+):
+    ui = build_worker_ui()
+    divergence = {"type": "bullish", "quality": {"score": 88}}
+    ui.find_coin_divergences_from_candles = lambda _candles: [divergence]
+    ui.select_freshest_best_signal = lambda _items, _count: divergence
+    ui.signal_age = lambda *_args: 1
+    ui.signal_status = lambda *_args: ("ACTIVE", "green")
+    ui.is_visible_signal = lambda *_args: True
+    monkeypatch.setattr(ui_module, "calculate_rsi", lambda _frame: 55)
+    monkeypatch.setattr(ui_module, "calculate_quality_score", lambda _quality: 88)
+    monkeypatch.setattr(fvg_diagnostics, "FVG_DIAGNOSTICS_ENABLED", True)
+    monkeypatch.setattr(fvg_diagnostics, "diagnostics_path", lambda: tmp_path)
+
+    result = run_worker(ui)
+
+    assert result["divergence"] is divergence
+    assert result["quality"] == 88
+    assert result["fvg_result"] is not None
+
+
+def test_diagnostics_write_error_preserves_chart_gaps(monkeypatch, tmp_path):
+    ui = SmartTradeUI.__new__(SmartTradeUI)
+    ui.fvg_enabled = True
+    ui.active_exchange_id = "bybit"
+    ui.current_scan_id = 1
+    ui.current_scan_results = {}
+    monkeypatch.setattr(fvg_diagnostics, "FVG_DIAGNOSTICS_ENABLED", True)
+    monkeypatch.setattr(fvg_diagnostics, "diagnostics_path", lambda: tmp_path)
+
+    gaps = ui.resolve_chart_fvg_gaps(sample_frame(), "BTCUSDT", "1")
+
+    assert gaps
+
+
+def test_enabled_diagnostics_add_no_market_request(monkeypatch, tmp_path):
+    ui = build_worker_ui()
+    monkeypatch.setattr(ui_module, "calculate_rsi", lambda _frame: 50)
+    monkeypatch.setattr(fvg_diagnostics, "FVG_DIAGNOSTICS_ENABLED", True)
+    monkeypatch.setattr(
+        fvg_diagnostics,
+        "diagnostics_path",
+        lambda: tmp_path / "fvg_diagnostics.jsonl",
+    )
+
+    run_worker(ui)
+
+    assert ui.fetch_calls == 1

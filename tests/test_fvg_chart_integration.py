@@ -59,6 +59,8 @@ def scan_record(ui, gaps, *, symbol="BTCUSDT", interval="60", scan_id=7, exchang
 
 def ui_shell():
     ui = SmartTradeUI.__new__(SmartTradeUI)
+    ui.fvg_enabled = True
+    ui.fvg_only_enabled = False
     ui.active_exchange_id = "bybit"
     ui.current_scan_id = 7
     ui.current_scan_results = {}
