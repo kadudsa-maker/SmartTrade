@@ -35,6 +35,7 @@ KLINE_CACHE_TTL = 30
 OKX_BASE_URL = "https://www.okx.com"
 OKX_EEA_BASE_URL = "https://eea.okx.com"
 PERF_DEBUG = False
+CARD_STATE_DEBUG = False
 # Distance Score preferuje zwarte dywergencje; zbyt długie układy są karane niższym wynikiem.
 DISTANCE_PROFILE = {
     "1": (12, 24),

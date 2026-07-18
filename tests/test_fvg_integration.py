@@ -3,6 +3,7 @@ import threading
 import pandas as pd
 
 import ui as ui_module
+from analysis_modes import FVG_ON
 from fvg import FVGOpportunityStatus, FVGService
 from fvg import diagnostics as fvg_diagnostics
 from ui import SmartTradeUI
@@ -24,8 +25,7 @@ def sample_frame():
 
 def build_worker_ui(frame=None):
     ui = SmartTradeUI.__new__(SmartTradeUI)
-    ui.fvg_enabled = True
-    ui.fvg_only_enabled = False
+    ui.rsi_view_option = type("ModeValue", (), {"get": lambda self: FVG_ON})()
     ui.selected_interval = "1"
     ui.active_exchange_id = "bybit"
     ui.buttons = []
@@ -223,8 +223,7 @@ def test_open_candle_cannot_invalidate_gap_used_by_service():
 
 def build_apply_ui():
     ui = SmartTradeUI.__new__(SmartTradeUI)
-    ui.fvg_enabled = True
-    ui.fvg_only_enabled = False
+    ui.rsi_view_option = type("ModeValue", (), {"get": lambda self: FVG_ON})()
     ui.ui_thread_id = threading.get_ident()
     ui.shutdown_requested = False
     ui.current_scan_id = 2
@@ -316,9 +315,9 @@ def test_diagnostics_write_error_preserves_scan_divergence_and_quality(
     assert result["fvg_result"] is not None
 
 
-def test_diagnostics_write_error_preserves_chart_gaps(monkeypatch, tmp_path):
+def test_chart_waits_for_matching_scan_result_when_diagnostics_are_enabled(monkeypatch, tmp_path):
     ui = SmartTradeUI.__new__(SmartTradeUI)
-    ui.fvg_enabled = True
+    ui.rsi_view_option = type("ModeValue", (), {"get": lambda self: FVG_ON})()
     ui.active_exchange_id = "bybit"
     ui.current_scan_id = 1
     ui.current_scan_results = {}
@@ -327,7 +326,7 @@ def test_diagnostics_write_error_preserves_chart_gaps(monkeypatch, tmp_path):
 
     gaps = ui.resolve_chart_fvg_gaps(sample_frame(), "BTCUSDT", "1")
 
-    assert gaps
+    assert gaps == ()
 
 
 def test_enabled_diagnostics_add_no_market_request(monkeypatch, tmp_path):

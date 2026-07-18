@@ -5,11 +5,23 @@ import time
 from tkinter import BooleanVar, StringVar, TclError, messagebox
 
 from alerts import AlertManager
+from analysis_modes import (
+    ANALYSIS_MODE_OPTIONS,
+    FVG_ON,
+    FVG_ONLY,
+    FVG_RSI,
+    RSI_VIEW_OFF,
+    RSI_VIEW_ON,
+    RSI_VIEW_QUALITY_SORT,
+    RSI_VIEW_SORT,
+    capabilities_for_mode,
+)
 from app_paths import configure_windows_window_icon
 from chart import SmartTradeChart
 from config import (
     ACTIVE_MAX_CANDLES,
     AGING_MAX_CANDLES,
+    CARD_STATE_DEBUG,
     MIN_VISIBLE_QUALITY,
     PERF_DEBUG,
     PIVOT_LEFT,
@@ -23,11 +35,7 @@ from config import (
 from divergence import find_regular_divergences
 from fvg import Candle, FVGDirection, FVGOpportunityStatus, FVGService
 from fvg import diagnostics as fvg_diagnostics
-from fvg.filtering import (
-    FVG_ANALYSIS_DEFAULT,
-    FVG_ONLY_DEFAULT,
-    record_matches_fvg_filter,
-)
+from fvg.filtering import normalize_fvg_status, record_has_qualifying_fvg
 from market import (
     calculate_rsi,
     filter_symbols,
@@ -123,10 +131,6 @@ ALERT_SCAN_RANGES = [
     (SCAN_MODE_TOP100, "Top 100"),
     (SCAN_MODE_TOP200, "Top 200")
 ]
-RSI_VIEW_OFF = "RSI OFF"
-RSI_VIEW_ON = "RSI ON"
-RSI_VIEW_SORT = "RSI Sort"
-RSI_VIEW_QUALITY_SORT = "RSI + Quality Sort"
 RSI_SORT_MODE_QUALITY = "quality"
 RSI_SORT_MODE_RSI = "rsi"
 RSI_SORT_MODE_RSI_QUALITY = "rsi_quality"
@@ -199,11 +203,6 @@ class SmartTradeUI:
         self.rsi_view_menu = None
         self.rsi_sort_mode = DEFAULT_RSI_SORT_MODE
         self.rsi_sort_mode_label = None
-        self.fvg_enabled = FVG_ANALYSIS_DEFAULT
-        self.fvg_only_enabled = FVG_ONLY_DEFAULT
-        self.fvg_enabled_button = None
-        self.fvg_only_button = None
-
         self.refresh_index = 0
         self.last_top50_sort_at = 0
         self.last_top50_order = []
@@ -565,13 +564,14 @@ class SmartTradeUI:
             or exchange_symbol != symbol
             or record.get("interval") != interval
             or record.get("market_label") != self.market_label()
+            or record.get("analysis_mode") != self.current_analysis_mode()
         ):
             return None
         return record
 
     def resolve_chart_fvg_gaps(self, df, symbol, interval):
 
-        if not getattr(self, "fvg_enabled", False):
+        if not self.current_analysis_capabilities().analyze_fvg:
             return ()
 
         record = self.matching_chart_scan_record(symbol, interval)
@@ -579,34 +579,7 @@ class SmartTradeUI:
             fvg_result = record.get("fvg_result")
             return () if fvg_result is None else tuple(fvg_result.gaps)
 
-        try:
-            candles = self.prepare_engine_candles(df, interval=interval)
-            closed, current, previous = self.prepare_fvg_candles(candles, interval)
-            result = FVGService().analyze(closed, current, previous)
-            self.record_fvg_diagnostics(
-                source="chart",
-                exchange_id=self.get_active_exchange_id(),
-                market=self.market_label(),
-                symbol=symbol,
-                timeframe=interval,
-                scan_id=None,
-                candles=candles,
-                closed_candles=closed,
-                current_candle=current,
-                previous_candle=previous,
-                result=result,
-            )
-            return tuple(result.gaps)
-        except Exception as error:
-            print(
-                "FVG chart analysis error: "
-                f"symbol={symbol} "
-                f"exchange_id={self.get_active_exchange_id()} "
-                f"timeframe={interval} "
-                f"error_type={type(error).__name__} "
-                f"error_message={error}"
-            )
-            return ()
+        return ()
 
     def clear_chart_fvg(self):
 
@@ -616,7 +589,7 @@ class SmartTradeUI:
 
     def update_selected_chart_fvg(self, result):
 
-        if not getattr(self, "fvg_enabled", False):
+        if not self.current_analysis_capabilities().analyze_fvg:
             self.clear_chart_fvg()
             return False
 
@@ -677,7 +650,8 @@ class SmartTradeUI:
                     display_symbol=job["display_symbol"],
                     market_label=job["market_label"],
                     platform_market_name=job["platform_market_name"],
-                    asset_class=job["asset_class"]
+                    asset_class=job["asset_class"],
+                    analysis_mode=job["analysis_mode"],
                 )
             except Exception as error:
                 result = self.create_scan_result_record(
@@ -693,7 +667,8 @@ class SmartTradeUI:
                     display_symbol=job["display_symbol"],
                     market_label=job["market_label"],
                     platform_market_name=job["platform_market_name"],
-                    asset_class=job["asset_class"]
+                    asset_class=job["asset_class"],
+                    analysis_mode=job["analysis_mode"],
                 )
                 result["error"] = f"{type(error).__name__}: {error}"
 
@@ -711,8 +686,6 @@ class SmartTradeUI:
         self.current_scan_rendered = 0
         self.scan_cycle_alert_sent_count = 0
         self.clear_scan_result_queue()
-        if getattr(self, "fvg_only_enabled", False):
-            self.apply_card_filters()
         return self.current_scan_id
 
     def clear_scan_result_queue(self):
@@ -742,7 +715,8 @@ class SmartTradeUI:
         display_symbol=None,
         market_label=None,
         platform_market_name=None,
-        asset_class=None
+        asset_class=None,
+        analysis_mode=None,
     ):
 
         exchange_id = exchange_id or self.get_active_exchange_id()
@@ -758,6 +732,7 @@ class SmartTradeUI:
             ),
             "market_label": market_label or self.market_label(exchange_id),
             "asset_class": asset_class or self.asset_class(symbol),
+            "analysis_mode": analysis_mode or self.current_analysis_mode(),
             "interval": interval,
             "index": index,
             "total_symbols": total_symbols,
@@ -820,7 +795,8 @@ class SmartTradeUI:
             "display_symbol": self.display_symbol(symbol),
             "market_label": self.market_label(),
             "platform_market_name": self.platform_market_name(symbol),
-            "asset_class": self.asset_class(symbol)
+            "asset_class": self.asset_class(symbol),
+            "analysis_mode": self.current_analysis_mode(),
         }
 
         with self.scan_job_lock:
@@ -872,9 +848,17 @@ class SmartTradeUI:
         if (
             result.get("scan_id") != self.current_scan_id
             or result.get("exchange_id", DEFAULT_EXCHANGE_ID) != self.get_active_exchange_id()
+            or result.get("interval") != getattr(
+                self, "selected_interval", result.get("interval")
+            )
+            or result.get("market_label") != self.market_label(
+                result.get("exchange_id")
+            )
+            or result.get("analysis_mode") != self.current_analysis_mode()
             or (active_symbols and exchange_symbol not in active_symbols)
             or (active_instruments and exchange_symbol not in active_instruments)
         ):
+            self.log_card_state(result, "stale_or_foreign_result")
             if is_active_job:
                 self.schedule_scan_loop(0)
             return False
@@ -882,8 +866,6 @@ class SmartTradeUI:
         callback_started_at = time.perf_counter()
         symbol = result["symbol"]
         index = result["index"]
-        if not getattr(self, "fvg_enabled", False):
-            self.remove_fvg_result_fields(result)
         if not hasattr(self, "current_scan_results"):
             self.current_scan_results = {}
         if not hasattr(self, "current_scan_rendered"):
@@ -894,6 +876,7 @@ class SmartTradeUI:
 
         if result["status"] == "error":
             print(f"Scan symbol error: {symbol}: {result['error']}")
+            self.handle_scan_error_card(result)
         else:
             ui_ready = False
             if self.is_top_bybit_mode():
@@ -908,6 +891,10 @@ class SmartTradeUI:
                     "rsi": result["rsi"],
                     "divergence": result["divergence"],
                     "candle_count": result["candle_count"],
+                    "quality": result.get("quality"),
+                    "scan_id": result["scan_id"],
+                    "interval": result["interval"],
+                    "analysis_mode": result["analysis_mode"],
                 }
                 for field in ("fvg_result", "fvg_status", "selected_fvg"):
                     if field in result:
@@ -929,6 +916,7 @@ class SmartTradeUI:
             card = getattr(self, "cards_by_symbol", {}).get(symbol)
             if ui_ready and card is not None:
                 self.apply_card_filter_to_card(card, result)
+                self.log_card_state(result, "scan_result_applied", card=card)
 
             self.process_alert_candidate(
                 symbol,
@@ -1208,6 +1196,7 @@ class SmartTradeUI:
             or exchange_symbol != symbol
             or record.get("interval") != getattr(self, "selected_interval", None)
             or record.get("market_label") != self.market_label()
+            or record.get("analysis_mode") != self.current_analysis_mode()
         ):
             return None
         return record
@@ -1218,10 +1207,12 @@ class SmartTradeUI:
             record = self.current_card_scan_record(symbol)
         if record is not None and record.get("status") == "error":
             return False
-        return record_matches_fvg_filter(
-            record,
-            getattr(self, "fvg_only_enabled", False),
-        )
+        capabilities = self.current_analysis_capabilities()
+        if capabilities.require_fvg and not record_has_qualifying_fvg(record):
+            return False
+        if capabilities.require_good_rsi and not self.has_good_rsi(record):
+            return False
+        return True
 
     def apply_card_filter_to_card(self, card, record=None):
 
@@ -1245,35 +1236,25 @@ class SmartTradeUI:
                 self.hide_watchlist_card(card, refresh=False)
         self.refresh_card_positions()
 
-    def configure_binary_filter_button(self, button, enabled):
+    def current_analysis_mode(self):
 
-        if button is None:
-            return
-        if enabled:
-            button.configure(
-                fg_color=BLUE,
-                hover_color="#2D83C4",
-                border_color=BLUE,
-                text_color="#FFFFFF",
-            )
-        else:
-            button.configure(
-                fg_color=PANEL_COLOR,
-                hover_color=BORDER_COLOR,
-                border_color=BORDER_COLOR,
-                text_color=TEXT_COLOR,
-            )
+        option = getattr(self, "rsi_view_option", None)
+        if option is None:
+            return DEFAULT_RSI_VIEW_OPTION
+        try:
+            return option.get()
+        except AttributeError:
+            return str(option)
 
-    def update_fvg_switch_buttons(self):
+    def current_analysis_capabilities(self):
 
-        self.configure_binary_filter_button(
-            getattr(self, "fvg_enabled_button", None),
-            getattr(self, "fvg_enabled", False),
-        )
-        self.configure_binary_filter_button(
-            getattr(self, "fvg_only_button", None),
-            getattr(self, "fvg_only_enabled", False),
-        )
+        return capabilities_for_mode(self.current_analysis_mode())
+
+    def has_good_rsi(self, record):
+
+        if not isinstance(record, dict):
+            return False
+        return self.rsi_value_color(record.get("rsi")) in (GREEN, RED)
 
     @staticmethod
     def remove_fvg_result_fields(record):
@@ -1292,23 +1273,60 @@ class SmartTradeUI:
         self.clear_fvg_card_sections()
         self.clear_chart_fvg()
 
-    def toggle_fvg_enabled(self):
+    def remove_top_result_card(self, symbol):
 
-        self.fvg_enabled = not getattr(self, "fvg_enabled", False)
-        if not self.fvg_enabled:
-            self.fvg_only_enabled = False
-            self.clear_stored_fvg_results()
-        self.update_fvg_switch_buttons()
-        self.apply_card_filters()
+        getattr(self, "top50_results", {}).pop(symbol, None)
+        card = getattr(self, "cards_by_symbol", {}).pop(symbol, None)
+        if card is None:
+            return
 
-    def toggle_fvg_only(self):
+        if card in getattr(self, "buttons", []):
+            self.buttons.remove(card)
+        getattr(self, "last_card_texts", {}).pop(card.get("symbol_value", symbol), None)
+        card["frame"].destroy()
+        self.refresh_card_positions()
 
-        enabling = not getattr(self, "fvg_only_enabled", False)
-        if enabling and not getattr(self, "fvg_enabled", False):
-            self.fvg_enabled = True
-        self.fvg_only_enabled = enabling
-        self.update_fvg_switch_buttons()
-        self.apply_card_filters()
+    def handle_scan_error_card(self, result):
+
+        symbol = result["symbol"]
+        card = getattr(self, "cards_by_symbol", {}).get(symbol)
+        if self.is_top_bybit_mode():
+            self.remove_top_result_card(symbol)
+            card = None
+        elif card is not None:
+            self.hide_watchlist_card(card)
+
+        self.log_card_state(result, "scan_error", card=card)
+        if CARD_STATE_DEBUG:
+            error_text = result.get("error") or ""
+            error_type, _, error_message = error_text.partition(": ")
+            print(
+                "CARD REMOVED AFTER SCAN ERROR: "
+                f"symbol={symbol} "
+                f"error_type={error_type or 'Unknown'} "
+                f"error_message={error_message or error_text}"
+            )
+
+    def log_card_state(self, result, reason, card=None):
+
+        if not CARD_STATE_DEBUG:
+            return
+
+        symbol = result.get("symbol")
+        card = card if card is not None else getattr(self, "cards_by_symbol", {}).get(symbol)
+        widget_mapped = self.card_widget_mapped(card)
+        print(
+            "CARD STATE: "
+            f"exchange_id={result.get('exchange_id')} "
+            f"scan_id={result.get('scan_id')} "
+            f"symbol={symbol} "
+            f"scan_status={result.get('status')} "
+            f"has_result={result.get('status') not in (None, 'pending', 'running')} "
+            f"has_divergence={result.get('divergence') is not None} "
+            f"ui_visible={widget_mapped} "
+            f"widget_mapped={widget_mapped} "
+            f"reason={reason}"
+        )
 
     def mark_scan_cycle_completed(self, symbol_count):
 
@@ -1509,7 +1527,8 @@ class SmartTradeUI:
         display_symbol=None,
         market_label=None,
         platform_market_name=None,
-        asset_class=None
+        asset_class=None,
+        analysis_mode=None,
     ):
 
         symbol = coin["symbol"]
@@ -1528,8 +1547,10 @@ class SmartTradeUI:
             display_symbol=display_symbol,
             market_label=market_label,
             platform_market_name=platform_market_name,
-            asset_class=asset_class
+            asset_class=asset_class,
+            analysis_mode=analysis_mode,
         )
+        capabilities = capabilities_for_mode(result["analysis_mode"])
 
         try:
             fetch_started_at = time.perf_counter()
@@ -1539,17 +1560,18 @@ class SmartTradeUI:
             df.attrs["timeframe"] = interval
             df.attrs["exchange_id"] = exchange_id or self.get_active_exchange_id()
 
-            rsi_started_at = time.perf_counter()
-            rsi = calculate_rsi(df)
-            self.perf_log("calculate_rsi", rsi_started_at, symbol=symbol)
+            rsi = None
+            if capabilities.analyze_rsi:
+                rsi_started_at = time.perf_counter()
+                rsi = calculate_rsi(df)
+                self.perf_log("calculate_rsi", rsi_started_at, symbol=symbol)
 
             candles_started_at = time.perf_counter()
             candles = self.prepare_engine_candles(df, interval=interval)
             self.perf_log("prepare_candles", candles_started_at, symbol=symbol)
 
-            fvg_enabled = bool(getattr(self, "fvg_enabled", False))
-            if fvg_enabled:
-                fvg_result = None
+            fvg_result = None
+            if capabilities.analyze_fvg:
                 try:
                     fvg_closed, fvg_current, fvg_previous = self.prepare_fvg_candles(
                         candles,
@@ -1583,19 +1605,23 @@ class SmartTradeUI:
                         f"error_message={fvg_error}"
                     )
 
-            divergence_started_at = time.perf_counter()
-            divergences = self.find_coin_divergences_from_candles(candles)
-            self.perf_log("find_divergences", divergence_started_at, symbol=symbol)
+            best_divergence = None
+            if capabilities.analyze_divergence:
+                divergence_started_at = time.perf_counter()
+                divergences = self.find_coin_divergences_from_candles(candles)
+                self.perf_log("find_divergences", divergence_started_at, symbol=symbol)
 
-            select_started_at = time.perf_counter()
-            best_divergence = self.select_freshest_best_signal(divergences, len(candles))
-            self.perf_log("select_signal", select_started_at, symbol=symbol)
+                select_started_at = time.perf_counter()
+                best_divergence = self.select_freshest_best_signal(
+                    divergences, len(candles)
+                )
+                self.perf_log("select_signal", select_started_at, symbol=symbol)
 
             quality_score = None
             candles_ago = None
             signal_status = ""
             ui_visible = False
-            if best_divergence is not None:
+            if best_divergence is not None and capabilities.analyze_quality:
                 quality_score = calculate_quality_score(best_divergence.get("quality"))
                 candles_ago = self.signal_age(best_divergence, len(candles))
                 signal_status, _status_color = self.signal_status(best_divergence, len(candles))
@@ -1612,7 +1638,7 @@ class SmartTradeUI:
                     "alert_candidate": best_divergence,
                     "ui_visible": ui_visible,
                 }
-            if fvg_enabled:
+            if capabilities.analyze_fvg:
                 result_fields.update(
                     {
                         "fvg_result": fvg_result,
@@ -1779,6 +1805,42 @@ class SmartTradeUI:
 
         return priorities.get(status, 0), freshness, quality_score, rsi
 
+    def analysis_mode_sort_key(self, result):
+
+        profile = self.current_analysis_capabilities().sort_profile
+        if profile == "standard":
+            return self.get_signal_sort_key(result)
+
+        fvg_priority = {"ACTIVE": 2, "PENDING": 1}.get(
+            normalize_fvg_status(result.get("fvg_status")), 0
+        )
+        good_rsi = 1 if self.has_good_rsi(result) else 0
+        quality = result.get("quality") or 0
+        selected_fvg = result.get("selected_fvg")
+        distance = getattr(selected_fvg, "distance_percent", None)
+        distance = float("inf") if distance is None else float(distance)
+
+        if profile == "fvg_rsi_quality":
+            return fvg_priority, good_rsi, quality
+        if profile == "fvg_only":
+            price_in_zone = 1 if fvg_priority == 2 and distance == 0 else 0
+            pending_distance = -distance if fvg_priority == 1 else 0
+            return fvg_priority, price_in_zone, pending_distance
+        if profile == "fvg_rsi":
+            if fvg_priority == 2:
+                combined_priority = 5 if good_rsi else 4
+            elif fvg_priority == 1:
+                combined_priority = 3 if good_rsi else 2
+            else:
+                combined_priority = 1
+            pending_distance = -distance if fvg_priority == 1 else 0
+            return (
+                combined_priority,
+                self.rsi_extreme_score(result.get("rsi")),
+                pending_distance,
+            )
+        return self.get_signal_sort_key(result)
+
     def rsi_view_sort_key(self, result):
 
         divergence = result.get("divergence")
@@ -1849,6 +1911,11 @@ class SmartTradeUI:
 
     def is_rsi_view_enabled(self):
 
+        capabilities = self.current_analysis_capabilities()
+        if not capabilities.analyze_rsi:
+            return False
+        if capabilities.analyze_fvg:
+            return True
         return (
             self.current_rsi_view_option() != RSI_VIEW_OFF
             or self.sorts_by_rsi_view()
@@ -1876,9 +1943,28 @@ class SmartTradeUI:
             self.rsi_sort_mode = RSI_SORT_MODE_RSI
         elif option == RSI_VIEW_QUALITY_SORT:
             self.rsi_sort_mode = RSI_SORT_MODE_RSI_QUALITY
+        elif option in (FVG_ON, FVG_ONLY, FVG_RSI):
+            self.rsi_sort_mode = RSI_SORT_MODE_QUALITY
 
         self.update_rsi_sort_mode_label()
-        self.refresh_rsi_view()
+        self.invalidate_analysis_mode_results()
+
+    def invalidate_analysis_mode_results(self):
+
+        self.scan_generation = getattr(self, "scan_generation", 0) + 1
+        self.current_scan_id = self.scan_generation
+        self.current_scan_results = {}
+        self.current_scan_rendered = 0
+        self.top50_results = {}
+        self.last_top50_order = []
+        self.last_card_texts = {}
+        self.clear_chart_fvg()
+
+        if getattr(self, "watchlist_scroll", None) is not None:
+            self.clear_watchlist_cards()
+            self.build_watchlist_cards()
+        else:
+            self.apply_card_filters()
 
     def update_rsi_sort_mode_label(self):
 
@@ -1887,7 +1973,7 @@ class SmartTradeUI:
 
         self.configure_label_if_changed(
             self.rsi_sort_mode_label,
-            text="RSI Sort"
+            text="MODE"
         )
 
     def refresh_rsi_view(self):
@@ -2062,6 +2148,7 @@ class SmartTradeUI:
             fvg_status=fvg_status,
             selected_fvg=selected_fvg,
         )
+        self.update_card_analysis_visibility(card)
 
         if divergence is None:
             status = ""
@@ -2148,6 +2235,32 @@ class SmartTradeUI:
         else:
             if rsi_cell.winfo_ismapped():
                 rsi_cell.grid_remove()
+
+    def update_card_analysis_visibility(self, card):
+
+        capabilities = self.current_analysis_capabilities()
+        show_standard = capabilities.analyze_divergence
+        frame = card.get("frame")
+        cells = card.get("analysis_cells", {})
+        for name, column, minsize in (
+            ("setup", 1, 42),
+            ("quality", 2, 46),
+            ("age", 4, 74),
+            ("status", 5, 62),
+        ):
+            cell = cells.get(name)
+            if cell is None:
+                continue
+            if show_standard:
+                if not cell.winfo_ismapped():
+                    cell.grid()
+            elif cell.winfo_ismapped():
+                cell.grid_remove()
+            if frame is not None and hasattr(frame, "grid_columnconfigure"):
+                frame.grid_columnconfigure(column, minsize=minsize if show_standard else 0)
+        if frame is not None and hasattr(frame, "grid_columnconfigure"):
+            frame.grid_columnconfigure(3, minsize=48 if capabilities.analyze_rsi else 0)
+        self.update_rsi_card_visibility(card)
 
     def configure_card_label_if_present(self, card, key, **options):
 
@@ -2422,15 +2535,19 @@ class SmartTradeUI:
         }
         labels["rsi"] = self.create_card_value(frame, 3, "RSI", "—", TEXT_COLOR)
         labels["rsi_cell"] = labels["rsi"].master
+        labels["analysis_cells"] = {
+            name: labels[name].master
+            for name in ("setup", "quality", "age", "status")
+        }
         fvg_cell, fvg_header, fvg_detail = self.create_fvg_card_section(frame)
         labels["fvg_cell"] = fvg_cell
         labels["fvg_header"] = fvg_header
         labels["fvg_detail"] = fvg_detail
-        self.update_rsi_card_visibility(labels)
+        labels["frame"] = frame
+        self.update_card_analysis_visibility(labels)
 
         self.bind_card_click(frame, symbol)
 
-        labels["frame"] = frame
         labels["symbol_value"] = symbol
         labels["exchange_id"] = self.get_active_exchange_id()
         labels["exchange_symbol"] = symbol
@@ -2716,16 +2833,21 @@ class SmartTradeUI:
 
         editable = self.scan_mode == SCAN_MODE_WATCHLIST
 
-        for index, coin in enumerate(self.coins):
+        for coin in self.coins:
+            if self.is_top_bybit_mode() and coin["symbol"] not in self.top50_results:
+                continue
+
+            visible_index = len(self.buttons)
+
             card = self.create_watchlist_card(
                 self.watchlist_scroll,
                 coin["symbol"],
-                index,
+                visible_index,
                 editable=editable
             )
 
             card["frame"].pack(fill="x", padx=8, pady=5)
-            card["index"] = index
+            card["index"] = visible_index
             self.buttons.append(card)
             self.cards_by_symbol[coin["symbol"]] = card
 
@@ -2734,7 +2856,7 @@ class SmartTradeUI:
 
                 if result is not None:
                     self.update_watchlist_card(
-                        index,
+                        visible_index,
                         result["symbol"],
                         result["rsi"],
                         result["divergence"],
@@ -2744,7 +2866,7 @@ class SmartTradeUI:
                         selected_fvg=result.get("selected_fvg")
                     )
 
-        if getattr(self, "fvg_only_enabled", False):
+        if self.current_analysis_capabilities().require_fvg:
             self.apply_card_filters()
         else:
             self.refresh_card_positions()
@@ -2755,13 +2877,20 @@ class SmartTradeUI:
         for card in getattr(self, "buttons", []):
             frame = card.get("frame")
             if frame is None:
+                self.configure_card_label_if_present(card, "position", text="")
                 continue
 
             try:
-                if not frame.winfo_manager():
-                    continue
-            except AttributeError:
-                pass
+                if hasattr(frame, "winfo_exists") and not frame.winfo_exists():
+                    is_visible = False
+                else:
+                    is_visible = bool(frame.winfo_manager())
+            except (AttributeError, TclError):
+                is_visible = False
+
+            if not is_visible:
+                self.configure_card_label_if_present(card, "position", text="")
+                continue
 
             position += 1
             self.configure_card_label_if_present(
@@ -2779,13 +2908,8 @@ class SmartTradeUI:
         for position, symbol in enumerate(self.top50_symbols):
             result = self.top50_results.get(symbol)
 
-            if result is None:
-                result = {
-                    "symbol": symbol,
-                    "rsi": 0,
-                    "divergence": None,
-                    "candle_count": 0
-                }
+            if result is None or symbol not in self.cards_by_symbol:
+                continue
 
             result["position"] = position
             results.append(result)
@@ -2793,7 +2917,7 @@ class SmartTradeUI:
         sorted_results = sorted(
             results,
             key=lambda result: (
-                self.get_signal_sort_key(result),
+                self.analysis_mode_sort_key(result),
                 -result["position"]
             ),
             reverse=True
@@ -2806,6 +2930,8 @@ class SmartTradeUI:
         if sorted_symbols != current_order:
             self.coins = [{"symbol": symbol} for symbol in sorted_symbols]
             self.reorder_top50_cards(sorted_results)
+        else:
+            self.refresh_card_positions()
 
         self.last_top50_order = sorted_symbols
 
@@ -2827,12 +2953,22 @@ class SmartTradeUI:
     def update_top50_result_card(self, symbol):
 
         card = self.cards_by_symbol.get(symbol)
+        card_created = card is None
 
-        if card is None:
-            return False
+        if card_created:
+            card = self.create_watchlist_card(
+                self.watchlist_scroll,
+                symbol,
+                len(self.buttons),
+                editable=False
+            )
+            card["frame"].pack(fill="x", padx=8, pady=5)
+            card["index"] = len(self.buttons)
+            self.buttons.append(card)
+            self.cards_by_symbol[symbol] = card
 
         result = self.top50_results[symbol]
-        return self.update_watchlist_card(
+        updated = self.update_watchlist_card(
             card["index"],
             result["symbol"],
             result["rsi"],
@@ -2842,6 +2978,9 @@ class SmartTradeUI:
             fvg_status=result.get("fvg_status", ""),
             selected_fvg=result.get("selected_fvg")
         )
+        if card_created:
+            self.refresh_card_positions()
+        return updated
 
     def build_top_scan_ranking(self):
 
@@ -2858,12 +2997,22 @@ class SmartTradeUI:
             result["position"] = position
             results.append(result)
 
+        if self.current_analysis_capabilities().sort_profile == "standard":
+            return sorted(
+                results,
+                key=lambda result: (
+                    1 if result.get("divergence") is not None else 0,
+                    result.get("quality") or 0,
+                    self.get_signal_sort_key(result),
+                    -result["position"],
+                ),
+                reverse=True,
+            )
+
         return sorted(
             results,
             key=lambda result: (
-                1 if result.get("divergence") is not None else 0,
-                result.get("quality") or 0,
-                self.get_signal_sort_key(result),
+                self.analysis_mode_sort_key(result),
                 -result["position"]
             ),
             reverse=True
@@ -3170,12 +3319,7 @@ class SmartTradeUI:
 
         self.rsi_view_menu = ctk.CTkOptionMenu(
             top_bar,
-            values=[
-                RSI_VIEW_ON,
-                RSI_VIEW_OFF,
-                RSI_VIEW_SORT,
-                RSI_VIEW_QUALITY_SORT
-            ],
+            values=list(ANALYSIS_MODE_OPTIONS),
             variable=self.rsi_view_option,
             command=self.apply_rsi_view_option,
             width=136,
@@ -3192,42 +3336,12 @@ class SmartTradeUI:
 
         self.rsi_sort_mode_label = ctk.CTkLabel(
             top_bar,
-            text="RSI Sort",
+            text="MODE",
             font=("Arial", 12, "bold"),
             text_color=MUTED_TEXT_COLOR
         )
         self.rsi_sort_mode_label.pack(side="right", padx=(0, 8))
 
-        self.fvg_only_button = ctk.CTkButton(
-            top_bar,
-            text="FVG ONLY",
-            width=82,
-            height=28,
-            fg_color=PANEL_COLOR,
-            hover_color=BORDER_COLOR,
-            border_color=BORDER_COLOR,
-            border_width=1,
-            text_color=TEXT_COLOR,
-            corner_radius=8,
-            command=self.toggle_fvg_only,
-        )
-        self.fvg_only_button.pack(side="right", padx=(0, 8))
-
-        self.fvg_enabled_button = ctk.CTkButton(
-            top_bar,
-            text="FVG ON",
-            width=70,
-            height=28,
-            fg_color=PANEL_COLOR,
-            hover_color=BORDER_COLOR,
-            border_color=BORDER_COLOR,
-            border_width=1,
-            text_color=TEXT_COLOR,
-            corner_radius=8,
-            command=self.toggle_fvg_enabled,
-        )
-        self.fvg_enabled_button.pack(side="right", padx=(0, 8))
-        self.update_fvg_switch_buttons()
 
     def update_open_chart_status(self, refreshed_at):
 

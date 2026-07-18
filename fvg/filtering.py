@@ -7,8 +7,6 @@ from typing import Any
 
 
 MATCHING_FVG_STATUSES = frozenset(("ACTIVE", "PENDING"))
-FVG_ANALYSIS_DEFAULT = False
-FVG_ONLY_DEFAULT = False
 
 
 def normalize_fvg_status(value: Any) -> str:
@@ -18,9 +16,7 @@ def normalize_fvg_status(value: Any) -> str:
     return value.strip().upper()
 
 
-def record_matches_fvg_filter(record: Mapping[str, Any] | None, enabled: bool) -> bool:
-    if not enabled:
-        return True
+def record_has_qualifying_fvg(record: Mapping[str, Any] | None) -> bool:
     if not isinstance(record, Mapping):
         return False
     return (
@@ -28,3 +24,8 @@ def record_matches_fvg_filter(record: Mapping[str, Any] | None, enabled: bool) -
         and record.get("fvg_result") is not None
         and record.get("selected_fvg") is not None
     )
+
+
+def record_matches_fvg_filter(record: Mapping[str, Any] | None, enabled: bool) -> bool:
+    """Legacy pure helper retained for external callers."""
+    return True if not enabled else record_has_qualifying_fvg(record)

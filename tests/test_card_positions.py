@@ -1,5 +1,6 @@
 import copy
 import inspect
+from tkinter import TclError
 
 import ui as ui_module
 from ui import SmartTradeUI
@@ -21,17 +22,30 @@ class FakeLabel:
 
 class FakeFrame:
 
-    def __init__(self, managed=True):
+    def __init__(self, managed=True, exists=True):
         self.managed = managed
+        self.exists = exists
+
+    def winfo_exists(self):
+        return self.exists
 
     def winfo_manager(self):
+        if not self.exists:
+            raise TclError("widget was destroyed")
         return "pack" if self.managed else ""
 
+    def pack(self, **_options):
+        self.managed = True
 
-def make_card(symbol, managed=True):
+    def destroy(self):
+        self.exists = False
+        self.managed = False
+
+
+def make_card(symbol, managed=True, exists=True):
     return {
         "symbol_value": symbol,
-        "frame": FakeFrame(managed),
+        "frame": FakeFrame(managed, exists),
         "position": FakeLabel(),
         "symbol": FakeLabel(symbol),
         "quality": FakeLabel("Q:80"),
@@ -79,6 +93,15 @@ def test_positions_show_first_and_tenth_card_in_current_order():
 
     assert cards[0]["position"].cget("text") == "1"
     assert cards[9]["position"].cget("text") == "10"
+
+
+def test_four_visible_cards_have_continuous_positions():
+    cards = [make_card(symbol) for symbol in ("A", "B", "C", "D")]
+    ui = make_ui(cards)
+
+    ui.refresh_card_positions()
+
+    assert [card["position"].cget("text") for card in cards] == ["1", "2", "3", "4"]
 
 
 def test_position_text_is_plain_for_one_two_and_three_digit_numbers():
@@ -148,6 +171,74 @@ def test_new_card_gets_next_position_and_hidden_cards_leave_no_gaps():
     ui.buttons.append(added)
     ui.refresh_card_positions()
     assert added["position"].cget("text") == "3"
+
+
+def test_hidden_third_card_regression_is_numbered_one_through_four():
+    cards = [make_card(f"COIN{index}") for index in range(1, 6)]
+    cards[2]["frame"].managed = False
+    ui = make_ui(cards)
+
+    ui.refresh_card_positions()
+
+    assert [
+        card["position"].cget("text")
+        for card in cards
+        if card["frame"].managed
+    ] == ["1", "2", "3", "4"]
+    assert cards[2]["position"].cget("text") == ""
+
+
+def test_missing_and_destroyed_widgets_do_not_increment_position_counter():
+    first = make_card("FIRST")
+    without_frame = make_card("NOFRAME")
+    without_frame["frame"] = None
+    destroyed = make_card("DESTROYED", exists=False)
+    last = make_card("LAST")
+    ui = make_ui([first, without_frame, destroyed, last])
+
+    ui.refresh_card_positions()
+
+    assert first["position"].cget("text") == "1"
+    assert destroyed["position"].cget("text") == ""
+    assert last["position"].cget("text") == "2"
+
+
+def test_removing_third_card_leaves_no_position_gap():
+    cards = [make_card(symbol) for symbol in ("A", "B", "C", "D")]
+    ui = make_ui(cards)
+    ui.refresh_card_positions()
+
+    ui.buttons.remove(cards[2])
+    ui.refresh_card_positions()
+
+    assert [card["position"].cget("text") for card in ui.buttons] == ["1", "2", "3"]
+
+
+def test_top_build_uses_visible_card_index_after_skipped_result():
+    ui = make_ui([])
+    ui.watchlist_scroll = object()
+    ui.coins = [{"symbol": symbol} for symbol in ("A", "B", "C", "D", "E")]
+    ui.scan_mode = "top200"
+    ui.cards_by_symbol = {}
+    ui.last_card_texts = {}
+    ui.top50_results = {
+        symbol: {"symbol": symbol, "rsi": 50, "divergence": None, "candle_count": 10}
+        for symbol in ("A", "B", "D", "E")
+    }
+    ui.is_top_bybit_mode = lambda: True
+    created_indexes = []
+
+    def create_card(_parent, symbol, index, editable=False):
+        created_indexes.append(index)
+        return make_card(symbol)
+
+    ui.create_watchlist_card = create_card
+    ui.update_watchlist_card = lambda *_args, **_kwargs: True
+    ui.refresh_card_positions = lambda: None
+
+    ui.build_watchlist_cards()
+
+    assert created_indexes == [0, 1, 2, 3]
 
 
 def test_position_refresh_changes_only_position_text():

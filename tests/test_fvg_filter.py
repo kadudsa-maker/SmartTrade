@@ -1,145 +1,90 @@
-from copy import deepcopy
-
 import pytest
 
 import ui as ui_module
-from fvg import FVGOpportunityStatus
-from fvg.filtering import (
-    FVG_ONLY_DEFAULT,
-    normalize_fvg_status,
-    record_matches_fvg_filter,
+from analysis_modes import ANALYSIS_MODE_OPTIONS, FVG_ON, FVG_ONLY, FVG_RSI
+from fvg import (
+    EvaluatedFVG,
+    FairValueGap,
+    FVGDirection,
+    FVGOpportunityStatus,
 )
-from ui import SmartTradeUI
+from fvg.filtering import normalize_fvg_status, record_has_qualifying_fvg
+from ui import GREEN, RED, SmartTradeUI
 
 
-class FakeFrame:
-    def __init__(self, mapped=True):
-        self.manager = "pack" if mapped else ""
-        self.pack_calls = 0
-        self.forget_calls = 0
+class ModeValue:
+    def __init__(self, value):
+        self.value = value
 
-    def winfo_manager(self):
-        return self.manager
+    def get(self):
+        return self.value
 
-    def winfo_exists(self):
-        return True
-
-    def pack(self, **_options):
-        self.manager = "pack"
-        self.pack_calls += 1
-
-    def pack_forget(self):
-        self.manager = ""
-        self.forget_calls += 1
+    def set(self, value):
+        self.value = value
 
 
-class FakeLabel:
-    def __init__(self):
-        self.options = {"text": ""}
-
-    def cget(self, key):
-        return self.options.get(key)
-
-    def configure(self, **options):
-        self.options.update(options)
+def selected(status, distance=0.0):
+    return EvaluatedFVG(
+        FairValueGap(FVGDirection.BULLISH, 1, 2, 100, 101),
+        status,
+        distance,
+    )
 
 
-class FakeButton:
-    def __init__(self):
-        self.options = {}
-
-    def configure(self, **options):
-        self.options.update(options)
-
-
-def card(symbol, mapped=True):
+def record(status="ACTIVE", *, rsi=50, distance=0.0, quality=0, position=0):
+    item = selected(FVGOpportunityStatus(status), distance)
     return {
-        "symbol_value": symbol,
-        "frame": FakeFrame(mapped),
-        "position": FakeLabel(),
-    }
-
-
-def scan_record(ui, symbol, fvg_status="ACTIVE", *, selected=object(), fvg_result=object(), **changes):
-    value = {
-        "scan_id": ui.current_scan_id,
-        "exchange_id": ui.active_exchange_id,
-        "exchange_symbol": symbol,
-        "symbol": symbol,
-        "interval": ui.selected_interval,
-        "market_label": ui.market_label(),
+        "fvg_status": status,
+        "fvg_result": object(),
+        "selected_fvg": item,
+        "rsi": rsi,
+        "quality": quality,
+        "position": position,
         "status": "no_signal",
-        "fvg_status": fvg_status,
-        "fvg_result": fvg_result,
-        "selected_fvg": selected,
-        "quality": 88,
-        "signal_status": "ACTIVE",
     }
-    value.update(changes)
-    return value
 
 
-def make_ui(symbols=("A", "B", "C"), enabled=True):
+def mode_ui(mode):
     ui = SmartTradeUI.__new__(SmartTradeUI)
-    ui.fvg_enabled = True
-    ui.fvg_only_enabled = enabled
-    ui.fvg_enabled_button = FakeButton()
-    ui.fvg_only_button = FakeButton()
-    ui.current_scan_id = 9
-    ui.active_exchange_id = "bybit"
-    ui.selected_interval = "15"
-    ui.current_scan_results = {}
-    ui.buttons = [card(symbol) for symbol in symbols]
-    ui.cards_by_symbol = {item["symbol_value"]: item for item in ui.buttons}
-    ui.market_label = lambda exchange_id=None: "Bybit Futures"
-    ui.get_active_exchange_id = lambda: ui.active_exchange_id
+    ui.rsi_view_option = ModeValue(mode)
     return ui
-
-
-def test_filter_is_disabled_by_default():
-    assert FVG_ONLY_DEFAULT is False
 
 
 @pytest.mark.parametrize(
     "value, expected",
     [
-        ("ACTIVE", "ACTIVE"), (" active ", "ACTIVE"),
-        ("PENDING", "PENDING"), ("pending", "PENDING"),
-        ("", ""), ("NONE", "NONE"), (None, ""), (123, ""),
+        ("ACTIVE", "ACTIVE"),
+        (" pending ", "PENDING"),
         (FVGOpportunityStatus.ACTIVE, "ACTIVE"),
-        (FVGOpportunityStatus.PENDING, "PENDING"),
+        (None, ""),
+        (123, ""),
     ],
 )
 def test_status_normalization(value, expected):
     assert normalize_fvg_status(value) == expected
 
 
+@pytest.mark.parametrize("status", ["ACTIVE", "PENDING"])
+def test_qualifying_fvg_matches(status):
+    assert record_has_qualifying_fvg(record(status))
+
+
 @pytest.mark.parametrize(
-    "enabled,status,result_value,selected,expected",
+    "changes",
     [
-        (False, "", None, None, True),
-        (False, "NONE", None, None, True),
-        (True, "ACTIVE", object(), object(), True),
-        (True, "PENDING", object(), object(), True),
-        (True, FVGOpportunityStatus.ACTIVE, object(), object(), True),
-        (True, FVGOpportunityStatus.PENDING, object(), object(), True),
-        (True, "NONE", object(), object(), False),
-        (True, "", object(), object(), False),
-        (True, "UNKNOWN", object(), object(), False),
-        (True, "ACTIVE", None, object(), False),
-        (True, "ACTIVE", object(), None, False),
-        (True, "PENDING", None, None, False),
-        (True, None, object(), object(), False),
-        (True, object(), object(), object(), False),
-        (True, "AGING", object(), object(), False),
+        {"fvg_status": ""},
+        {"fvg_status": "NONE"},
+        {"fvg_result": None},
+        {"selected_fvg": None},
     ],
 )
-def test_record_match_contract(enabled, status, result_value, selected, expected):
-    record = {"fvg_status": status, "fvg_result": result_value, "selected_fvg": selected}
-    assert record_matches_fvg_filter(record, enabled) is expected
+def test_missing_or_nonqualifying_fvg_does_not_match(changes):
+    value = record()
+    value.update(changes)
+    assert not record_has_qualifying_fvg(value)
 
 
-def test_filter_control_exists_beside_rsi_controls(monkeypatch):
+def test_three_fvg_modes_are_in_existing_menu_and_no_buttons(monkeypatch):
     widgets = []
 
     class Widget:
@@ -162,140 +107,280 @@ def test_filter_control_exists_beside_rsi_controls(monkeypatch):
     monkeypatch.setattr(ui_module.ctk, "CTkOptionMenu", Widget)
     ui = SmartTradeUI.__new__(SmartTradeUI)
     ui.center = object()
-    ui.rsi_view_option = object()
-    ui.fvg_enabled = False
-    ui.fvg_only_enabled = False
+    ui.rsi_view_option = ModeValue(FVG_ON)
     ui.build_top_bar()
-    assert ui.fvg_enabled_button.options["text"] == "FVG ON"
-    assert ui.fvg_enabled_button.options["command"] == ui.toggle_fvg_enabled
-    assert ui.fvg_only_button.options["text"] == "FVG ONLY"
-    assert ui.fvg_only_button.options["command"] == ui.toggle_fvg_only
-    assert ui.rsi_view_menu in widgets
-
-
-def test_first_and_second_only_click_toggle_state_and_visuals():
-    ui = make_ui(())
-    ui.fvg_only_enabled = False
-    ui.toggle_fvg_only()
-    assert ui.fvg_only_enabled is True
-    assert ui.fvg_only_button.options["fg_color"] == ui_module.BLUE
-    ui.toggle_fvg_only()
-    assert ui.fvg_only_enabled is False
-    assert ui.fvg_only_button.options["fg_color"] == ui_module.PANEL_COLOR
-
-
-def test_click_uses_existing_records_without_recalculation():
-    ui = make_ui(("A",), enabled=False)
-    ui.current_scan_results["A"] = scan_record(ui, "A")
-    before = deepcopy({key: value for key, value in ui.current_scan_results["A"].items() if key not in ("fvg_result", "selected_fvg")})
-    ui.scan_now = lambda: (_ for _ in ()).throw(AssertionError("scan"))
-    ui.fetch_klines = lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("request"))
-    ui.find_coin_divergences_from_candles = lambda *_a: (_ for _ in ()).throw(AssertionError("divergence"))
-    ui.toggle_fvg_only()
-    after = {key: value for key, value in ui.current_scan_results["A"].items() if key not in ("fvg_result", "selected_fvg")}
-    assert after == before
-
-
-def test_filter_preserves_quality_signal_status_and_order():
-    ui = make_ui(("A", "B"))
-    ui.current_scan_results = {
-        "A": scan_record(ui, "A", "PENDING"),
-        "B": scan_record(ui, "B", "ACTIVE"),
-    }
-    original_order = list(ui.buttons)
-    original_fields = [(item["quality"], item["signal_status"]) for item in ui.current_scan_results.values()]
-    ui.apply_card_filters()
-    assert ui.buttons == original_order
-    assert [(item["quality"], item["signal_status"]) for item in ui.current_scan_results.values()] == original_fields
-
-
-def test_filter_hides_nonmatches_without_layout_gaps_and_numbers_continuously():
-    ui = make_ui(("A", "B", "C"))
-    ui.current_scan_results = {
-        "A": scan_record(ui, "A", "ACTIVE"),
-        "B": scan_record(ui, "B", ""),
-        "C": scan_record(ui, "C", "PENDING"),
-    }
-    ui.apply_card_filters()
-    assert [item["frame"].winfo_manager() for item in ui.buttons] == ["pack", "", "pack"]
-    assert [item["position"].cget("text") for item in ui.buttons] == ["1", "", "2"]
-
-
-def test_disabling_filter_restores_layout_order_and_numbering():
-    ui = make_ui(("A", "B", "C"))
-    ui.current_scan_results = {
-        "A": scan_record(ui, "A", "ACTIVE"),
-        "B": scan_record(ui, "B", ""),
-        "C": scan_record(ui, "C", "PENDING"),
-    }
-    ui.apply_card_filters()
-    ui.toggle_fvg_only()
-    assert [item["frame"].winfo_manager() for item in ui.buttons] == ["pack"] * 3
-    assert [item["position"].cget("text") for item in ui.buttons] == ["1", "2", "3"]
+    assert set((FVG_ON, FVG_ONLY, FVG_RSI)).issubset(ANALYSIS_MODE_OPTIONS)
+    assert ui.rsi_view_menu.options["values"] == list(ANALYSIS_MODE_OPTIONS)
+    assert not hasattr(ui, "fvg_enabled_button")
+    assert not hasattr(ui, "fvg_only_button")
 
 
 @pytest.mark.parametrize(
-    "old_status,new_status,old_visible,new_visible",
+    "mode,value,expected",
     [
-        ("", "PENDING", False, True),
-        ("", "ACTIVE", False, True),
-        ("PENDING", "ACTIVE", True, True),
-        ("ACTIVE", "PENDING", True, True),
-        ("ACTIVE", "", True, False),
-        ("PENDING", "NONE", True, False),
-        ("ACTIVE", "UNKNOWN", True, False),
-        ("PENDING", "", True, False),
+        (FVG_ON, {"fvg_status": "", "fvg_result": None, "selected_fvg": None}, True),
+        (FVG_ONLY, record("ACTIVE"), True),
+        (FVG_ONLY, record("PENDING", distance=0.2), True),
+        (FVG_ONLY, {"fvg_status": "", "fvg_result": None, "selected_fvg": None}, False),
+        (FVG_RSI, record("ACTIVE", rsi=30), True),
+        (FVG_RSI, record("PENDING", rsi=60), True),
+        (FVG_RSI, record("ACTIVE", rsi=45), True),
+        (FVG_RSI, {"rsi": 30}, True),
     ],
 )
-def test_status_transition_updates_card_visibility(old_status, new_status, old_visible, new_visible):
-    ui = make_ui(("A",))
-    old = scan_record(ui, "A", old_status)
-    ui.current_scan_results["A"] = old
-    assert ui.apply_card_filter_to_card(ui.buttons[0], old) is old_visible
-    new = scan_record(ui, "A", new_status)
-    ui.current_scan_results["A"] = new
-    assert ui.apply_card_filter_to_card(ui.buttons[0], new) is new_visible
+def test_mode_visibility_contract(mode, value, expected):
+    ui = mode_ui(mode)
+    assert ui.card_matches_active_filters("BTCUSDT", value) is expected
 
 
-def test_fvg_analysis_error_hides_card_without_deleting_other_data():
-    ui = make_ui(("A",))
-    failed = scan_record(ui, "A", "", fvg_result=None, selected=None)
-    assert ui.apply_card_filter_to_card(ui.buttons[0], failed) is False
-    assert failed["quality"] == 88
-    assert failed["signal_status"] == "ACTIVE"
+def test_good_rsi_reuses_existing_color_logic():
+    ui = mode_ui(FVG_RSI)
+    assert ui.has_good_rsi({"rsi": 30})
+    assert ui.rsi_value_color(30) == GREEN
+    assert ui.has_good_rsi({"rsi": 60})
+    assert ui.rsi_value_color(60) == RED
+    assert not ui.has_good_rsi({"rsi": 45})
 
 
-def test_old_scan_id_cannot_restore_visibility():
-    ui = make_ui(("A",))
-    stale = scan_record(ui, "A", "ACTIVE", scan_id=8)
-    ui.current_scan_results["A"] = stale
+def test_fvg_rsi_keeps_neutral_rsi_and_missing_fvg_visible():
+    ui = mode_ui(FVG_RSI)
+    assert ui.card_matches_active_filters("ACTIVE", record("ACTIVE", rsi=45))
+    assert ui.card_matches_active_filters("PENDING", record("PENDING", rsi=45))
+    assert ui.card_matches_active_filters("OTHER", {"rsi": 45, "status": "no_signal"})
+
+
+def test_fvg_only_remains_the_fvg_filter_exception():
+    missing_fvg = {"rsi": 30, "status": "no_signal"}
+    assert not mode_ui(FVG_ONLY).card_matches_active_filters("OTHER", missing_fvg)
+    assert mode_ui(FVG_RSI).card_matches_active_filters("OTHER", missing_fvg)
+
+
+def sorted_symbols(ui, records):
+    for position, item in enumerate(records):
+        item["position"] = position
+    return [
+        item["symbol"]
+        for item in sorted(
+            records,
+            key=lambda item: (ui.analysis_mode_sort_key(item), -item["position"]),
+            reverse=True,
+        )
+    ]
+
+
+def named(symbol, item):
+    item["symbol"] = symbol
+    return item
+
+
+def test_fvg_on_sorts_fvg_then_rsi_then_quality_stably():
+    ui = mode_ui(FVG_ON)
+    values = [
+        named("NONE", {"fvg_status": "", "rsi": 30, "quality": 100}),
+        named("PENDING", record("PENDING", rsi=45, quality=100)),
+        named("ACTIVE_NEUTRAL", record("ACTIVE", rsi=45, quality=100)),
+        named("ACTIVE_GOOD_LOW_Q", record("ACTIVE", rsi=30, quality=20)),
+        named("ACTIVE_GOOD_HIGH_Q", record("ACTIVE", rsi=60, quality=90)),
+        named("ACTIVE_GOOD_HIGH_Q_2", record("ACTIVE", rsi=60, quality=90)),
+    ]
+    assert sorted_symbols(ui, values) == [
+        "ACTIVE_GOOD_HIGH_Q",
+        "ACTIVE_GOOD_HIGH_Q_2",
+        "ACTIVE_GOOD_LOW_Q",
+        "ACTIVE_NEUTRAL",
+        "PENDING",
+        "NONE",
+    ]
+
+
+def test_fvg_only_sorts_active_before_pending_and_pending_by_distance():
+    ui = mode_ui(FVG_ONLY)
+    values = [
+        named("PENDING_FAR", record("PENDING", distance=0.25, rsi=30, quality=100)),
+        named("ACTIVE", record("ACTIVE", distance=0, rsi=45, quality=0)),
+        named("PENDING_NEAR", record("PENDING", distance=0.05, rsi=60, quality=0)),
+    ]
+    assert sorted_symbols(ui, values) == ["ACTIVE", "PENDING_NEAR", "PENDING_FAR"]
+
+
+def test_fvg_only_ignores_rsi_and_quality_for_order():
+    ui = mode_ui(FVG_ONLY)
+    values = [
+        named("FIRST", record("ACTIVE", rsi=45, quality=0)),
+        named("SECOND", record("ACTIVE", rsi=30, quality=100)),
+    ]
+    assert sorted_symbols(ui, values) == ["FIRST", "SECOND"]
+
+
+def test_fvg_rsi_uses_combined_priority_without_filtering_weaker_coins():
+    ui = mode_ui(FVG_RSI)
+    values = [
+        named("OTHER", {"fvg_status": "", "rsi": 30, "quality": 100}),
+        named("PENDING_NEUTRAL", record("PENDING", rsi=45, distance=0.05)),
+        named("PENDING_GOOD", record("PENDING", rsi=60, distance=0.2)),
+        named("ACTIVE_NEUTRAL", record("ACTIVE", rsi=45)),
+        named("ACTIVE_GOOD", record("ACTIVE", rsi=30)),
+    ]
+    assert sorted_symbols(ui, values) == [
+        "ACTIVE_GOOD",
+        "ACTIVE_NEUTRAL",
+        "PENDING_GOOD",
+        "PENDING_NEUTRAL",
+        "OTHER",
+    ]
+
+
+class FakeCell:
+    def __init__(self, mapped=True):
+        self.mapped = mapped
+
+    def winfo_ismapped(self):
+        return self.mapped
+
+    def grid(self):
+        self.mapped = True
+
+    def grid_remove(self):
+        self.mapped = False
+
+
+class FakeCardFrame(FakeCell):
+    def __init__(self, mapped=True):
+        super().__init__(mapped)
+        self.manager = "pack" if mapped else ""
+        self.columns = {}
+
+    def winfo_manager(self):
+        return self.manager
+
+    def pack(self, **_options):
+        self.manager = "pack"
+
+    def pack_forget(self):
+        self.manager = ""
+
+    def grid_columnconfigure(self, column, **options):
+        self.columns[column] = options
+
+
+class FakeLabel:
+    def __init__(self):
+        self.text = ""
+
+    def cget(self, key):
+        return self.text if key == "text" else None
+
+    def configure(self, **options):
+        self.text = options.get("text", self.text)
+
+
+def lifecycle_ui(mode, symbols=("A", "B", "C")):
+    ui = mode_ui(mode)
+    ui.current_scan_id = 9
+    ui.active_exchange_id = "bybit"
+    ui.selected_interval = "15"
+    ui.market_label = lambda exchange_id=None: "Bybit Futures"
+    ui.get_active_exchange_id = lambda: "bybit"
+    ui.buttons = [
+        {
+            "symbol_value": symbol,
+            "frame": FakeCardFrame(),
+            "position": FakeLabel(),
+        }
+        for symbol in symbols
+    ]
+    ui.cards_by_symbol = {card["symbol_value"]: card for card in ui.buttons}
+    ui.current_scan_results = {}
+    return ui
+
+
+def contextual_record(ui, symbol, **changes):
+    value = record("ACTIVE", rsi=30)
+    value.update(
+        {
+            "scan_id": ui.current_scan_id,
+            "exchange_id": "bybit",
+            "exchange_symbol": symbol,
+            "symbol": symbol,
+            "interval": ui.selected_interval,
+            "market_label": "Bybit Futures",
+            "analysis_mode": ui.current_analysis_mode(),
+        }
+    )
+    value.update(changes)
+    return value
+
+
+def test_fvg_only_hides_nonmatches_without_gaps_and_numbers_continuously():
+    ui = lifecycle_ui(FVG_ONLY)
+    ui.current_scan_results = {
+        "A": contextual_record(ui, "A"),
+        "B": contextual_record(ui, "B", fvg_status="", selected_fvg=None),
+        "C": contextual_record(
+            ui,
+            "C",
+            fvg_status="PENDING",
+            selected_fvg=selected(FVGOpportunityStatus.PENDING, 0.1),
+        ),
+    }
     ui.apply_card_filters()
-    assert ui.buttons[0]["frame"].winfo_manager() == ""
+    assert [card["frame"].winfo_manager() for card in ui.buttons] == ["pack", "", "pack"]
+    assert [card["position"].cget("text") for card in ui.buttons] == ["1", "", "2"]
 
 
 @pytest.mark.parametrize(
-    "changed_field,value",
+    "field,value",
     [
-        ("interval", "60"),
+        ("scan_id", 8),
         ("exchange_id", "okx"),
         ("market_label", "OKX Perpetual"),
-        ("scan_id", 8),
+        ("interval", "60"),
+        ("analysis_mode", FVG_RSI),
     ],
 )
-def test_previous_context_record_does_not_match(changed_field, value):
-    ui = make_ui(("A",))
-    ui.current_scan_results["A"] = scan_record(ui, "A", **{changed_field: value})
+def test_previous_context_record_cannot_restore_card(field, value):
+    ui = lifecycle_ui(FVG_ONLY, ("A",))
+    ui.current_scan_results["A"] = contextual_record(ui, "A", **{field: value})
     ui.apply_card_filters()
     assert ui.buttons[0]["frame"].winfo_manager() == ""
 
 
-@pytest.mark.parametrize("mode", ["watchlist", "top50", "top100", "top200"])
-def test_shared_filter_path_works_in_every_scan_mode(mode):
-    ui = make_ui(("A", "B"))
-    ui.scan_mode = mode
+@pytest.mark.parametrize("scan_mode", ["watchlist", "top50", "top100", "top200"])
+def test_mode_filter_path_is_shared_by_every_scan_range(scan_mode):
+    ui = lifecycle_ui(FVG_RSI, ("A", "B"))
+    ui.scan_mode = scan_mode
     ui.current_scan_results = {
-        "A": scan_record(ui, "A", "ACTIVE"),
-        "B": scan_record(ui, "B", "NONE"),
+        "A": contextual_record(ui, "A", rsi=30),
+        "B": contextual_record(ui, "B", rsi=45),
     }
     ui.apply_card_filters()
-    assert [item["frame"].winfo_manager() for item in ui.buttons] == ["pack", ""]
+    assert [card["frame"].winfo_manager() for card in ui.buttons] == ["pack", "pack"]
+
+
+@pytest.mark.parametrize(
+    "mode, expected_standard, expected_rsi, expected_rsi_width",
+    [
+        (FVG_ON, True, True, 48),
+        (FVG_ONLY, False, False, 0),
+        (FVG_RSI, False, True, 48),
+    ],
+)
+def test_disabled_analysis_sections_are_removed_from_card_grid(
+    mode, expected_standard, expected_rsi, expected_rsi_width
+):
+    ui = mode_ui(mode)
+    frame = FakeCardFrame()
+    card = {
+        "frame": frame,
+        "rsi_cell": FakeCell(),
+        "analysis_cells": {
+            name: FakeCell() for name in ("setup", "quality", "age", "status")
+        },
+    }
+    ui.update_card_analysis_visibility(card)
+    assert all(
+        cell.winfo_ismapped() is expected_standard
+        for cell in card["analysis_cells"].values()
+    )
+    assert card["rsi_cell"].winfo_ismapped() is expected_rsi
+    assert frame.columns[3]["minsize"] == expected_rsi_width

@@ -2,6 +2,7 @@ import pandas as pd
 import plotly.graph_objects as go
 
 import ui as ui_module
+from analysis_modes import FVG_ON, FVG_ONLY
 from chart import SmartTradeChart
 from fvg import (
     EvaluatedFVG,
@@ -53,14 +54,14 @@ def scan_record(ui, gaps, *, symbol="BTCUSDT", interval="60", scan_id=7, exchang
         "exchange_symbol": symbol,
         "interval": interval,
         "market_label": ui.market_label(exchange),
+        "analysis_mode": FVG_ON,
         "fvg_result": fvg_result(gaps) if gaps is not None else None,
     }
 
 
 def ui_shell():
     ui = SmartTradeUI.__new__(SmartTradeUI)
-    ui.fvg_enabled = True
-    ui.fvg_only_enabled = False
+    ui.rsi_view_option = type("ModeValue", (), {"get": lambda self: FVG_ON})()
     ui.active_exchange_id = "bybit"
     ui.current_scan_id = 7
     ui.current_scan_results = {}
@@ -137,7 +138,7 @@ def test_stale_scan_id_is_not_used_for_chart(monkeypatch):
     ui.prepare_engine_candles = lambda frame, interval=None: frame
     ui.prepare_fvg_candles = lambda frame, interval: ((1, 2), 3, 2)
     assert ui.resolve_chart_fvg_gaps(raw_frame(), "BTCUSDT", "60") == ()
-    assert calls == [True]
+    assert calls == []
 
 
 def test_record_for_other_symbol_is_not_used(monkeypatch):
@@ -165,7 +166,7 @@ def test_record_for_other_timeframe_is_not_used(monkeypatch):
     ui.prepare_engine_candles = lambda frame, interval=None: frame
     ui.prepare_fvg_candles = lambda frame, interval: ((1, 2), 3, 2)
     ui.resolve_chart_fvg_gaps(raw_frame(), "BTCUSDT", "60")
-    assert calls == [True]
+    assert calls == []
 
 
 def test_record_for_other_exchange_is_not_used(monkeypatch):
@@ -182,28 +183,38 @@ def test_record_for_other_exchange_is_not_used(monkeypatch):
     ui.prepare_engine_candles = lambda frame, interval=None: frame
     ui.prepare_fvg_candles = lambda frame, interval: ((1, 2), 3, 2)
     ui.resolve_chart_fvg_gaps(raw_frame(), "BTCUSDT", "60")
-    assert calls == [True]
+    assert calls == []
 
 
-def test_fallback_analyzes_chart_candles_exactly_once(monkeypatch):
+def test_record_from_previous_analysis_mode_is_not_used(monkeypatch):
+    ui = ui_shell()
+    old = scan_record(ui, [evaluated()])
+    old["analysis_mode"] = FVG_ONLY
+    ui.current_scan_results["BTCUSDT"] = old
+    monkeypatch.setattr(
+        ui_module,
+        "FVGService",
+        lambda: (_ for _ in ()).throw(AssertionError("chart must not reanalyze")),
+    )
+    assert ui.resolve_chart_fvg_gaps(raw_frame(), "BTCUSDT", "60") == ()
+
+
+def test_missing_scan_record_does_not_reanalyze_chart_candles(monkeypatch):
     ui = ui_shell()
     analyzed = []
     prepared = object()
     ui.prepare_engine_candles = lambda frame, interval=None: prepared
     ui.prepare_fvg_candles = lambda frame, interval: (("closed",), "current", "previous")
 
-    class Service:
-        def analyze(self, closed, current, previous):
-            analyzed.append((closed, current, previous))
-            return fvg_result([evaluated()])
-
-    monkeypatch.setattr(ui_module, "FVGService", Service)
+    monkeypatch.setattr(ui_module, "FVGService", lambda: (_ for _ in ()).throw(
+        AssertionError("chart must wait for scanner result")
+    ))
     gaps = ui.resolve_chart_fvg_gaps(raw_frame(), "BTCUSDT", "60")
-    assert gaps == (evaluated(),)
-    assert analyzed == [(("closed",), "current", "previous")]
+    assert gaps == ()
+    assert analyzed == []
 
 
-def test_fallback_reuses_existing_closed_candle_helper(monkeypatch):
+def test_missing_scan_record_skips_closed_candle_helper(monkeypatch):
     ui = ui_shell()
     helper_calls = []
     ui.prepare_engine_candles = lambda frame, interval=None: frame
@@ -218,7 +229,7 @@ def test_fallback_reuses_existing_closed_candle_helper(monkeypatch):
     )())
     frame = raw_frame()
     ui.resolve_chart_fvg_gaps(frame, "BTCUSDT", "60")
-    assert helper_calls == [(frame, "60")]
+    assert helper_calls == []
 
 
 def test_fvg_analysis_error_returns_empty_gaps_and_chart_can_render(monkeypatch):
