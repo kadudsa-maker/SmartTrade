@@ -15,7 +15,7 @@ $Shell = New-Object -ComObject WScript.Shell
 $Shortcut = $Shell.CreateShortcut($ShortcutPath)
 $Shortcut.TargetPath = $ExePath
 $Shortcut.WorkingDirectory = $AppDir
-$Shortcut.Description = "SmartTrade Market Scanner"
+$Shortcut.Description = "SmartTrade $([char]0x2014) Market Structure and Trend Health"
 $Shortcut.IconLocation = "$ExePath,0"
 $Shortcut.Save()
 

@@ -57,7 +57,13 @@ Remove-BuildFolder $DistPath
 Write-Step "Building SmartTrade.exe in onedir mode"
 Push-Location $ProjectRoot
 try {
-    Invoke-Checked "python" @("-m", "PyInstaller", "--noconfirm", $SpecPath)
+    Invoke-Checked "python" @(
+        "-m",
+        "PyInstaller",
+        "--clean",
+        "--noconfirm",
+        $SpecPath
+    )
 }
 finally {
     Pop-Location
