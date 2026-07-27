@@ -60,6 +60,7 @@ class SmartTradeChart:
         self._manual_view_end = None
         self._drag_start_x = None
         self._drag_start_bounds = None
+        self._last_drag_candle_delta = None
 
         self.canvas = tk.Canvas(
             self.frame,
@@ -456,14 +457,15 @@ class SmartTradeChart:
         usable_width = max(1, width - (padding * 2))
         anchor_fraction = (getattr(event, "x", width / 2) - padding) / usable_width
         anchor_fraction = max(0.0, min(1.0, anchor_fraction))
-        self.zoom_view(zoom_in=zoom_in, anchor_fraction=anchor_fraction)
-        self._draw()
+        if self.zoom_view(zoom_in=zoom_in, anchor_fraction=anchor_fraction):
+            self._draw()
         return "break"
 
     def _on_drag_start(self, event):
 
         self._drag_start_x = getattr(event, "x", 0)
         self._drag_start_bounds = self._visible_candle_bounds()
+        self._last_drag_candle_delta = None
 
     def _on_drag_motion(self, event):
 
@@ -475,14 +477,18 @@ class SmartTradeChart:
         pixels_per_candle = width / max(visible_count, 1)
         pixel_delta = getattr(event, "x", self._drag_start_x) - self._drag_start_x
         candle_delta = round(-pixel_delta / max(pixels_per_candle, 1e-9))
-        self.pan_view(candle_delta, bounds=self._drag_start_bounds)
-        self._draw()
+        if candle_delta == self._last_drag_candle_delta:
+            return "break"
+        self._last_drag_candle_delta = candle_delta
+        if self.pan_view(candle_delta, bounds=self._drag_start_bounds):
+            self._draw()
         return "break"
 
     def _on_drag_end(self, _event):
 
         self._drag_start_x = None
         self._drag_start_bounds = None
+        self._last_drag_candle_delta = None
 
     def _on_view_reset(self, _event):
 
@@ -496,6 +502,7 @@ class SmartTradeChart:
         self._manual_view_end = None
         self._drag_start_x = None
         self._drag_start_bounds = None
+        self._last_drag_candle_delta = None
         if redraw and hasattr(self, "canvas"):
             self._draw()
 
@@ -513,8 +520,9 @@ class SmartTradeChart:
         anchor_fraction = max(0.0, min(1.0, float(anchor_fraction)))
         anchor_index = start + (anchor_fraction * max(visible_count - 1, 0))
         new_start = round(anchor_index - (anchor_fraction * max(new_count - 1, 0)))
+        previous_bounds = start, end
         self._set_manual_view(new_start, new_start + new_count)
-        return True
+        return self._visible_candle_bounds() != previous_bounds
 
     def pan_view(self, candle_delta, *, bounds=None):
 
@@ -524,8 +532,9 @@ class SmartTradeChart:
         start, end = self._visible_candle_bounds() if bounds is None else bounds
         visible_count = end - start
         new_start = start + int(candle_delta)
+        previous_bounds = start, end
         self._set_manual_view(new_start, new_start + visible_count)
-        return True
+        return self._visible_candle_bounds() != previous_bounds
 
     def _set_manual_view(self, start, end):
 
@@ -588,14 +597,14 @@ class SmartTradeChart:
             candle_area_height,
         )
 
-        for index, candle in visible_candles.iterrows():
+        for index, candle in enumerate(visible_candles.itertuples(index=False)):
             x = padding + (index * step) + (step / 2)
-            open_y = self._price_to_y(candle["open"], high, low, price_top, candle_area_height)
-            high_y = self._price_to_y(candle["high"], high, low, price_top, candle_area_height)
-            low_y = self._price_to_y(candle["low"], high, low, price_top, candle_area_height)
-            close_y = self._price_to_y(candle["close"], high, low, price_top, candle_area_height)
+            open_y = self._price_to_y(candle.open, high, low, price_top, candle_area_height)
+            high_y = self._price_to_y(candle.high, high, low, price_top, candle_area_height)
+            low_y = self._price_to_y(candle.low, high, low, price_top, candle_area_height)
+            close_y = self._price_to_y(candle.close, high, low, price_top, candle_area_height)
 
-            color = "#26a69a" if candle["close"] >= candle["open"] else "#ef5350"
+            color = "#26a69a" if candle.close >= candle.open else "#ef5350"
 
             self.canvas.create_line(x, high_y, x, low_y, fill=color, width=1)
             self.canvas.create_rectangle(
@@ -636,12 +645,12 @@ class SmartTradeChart:
 
         candle_count = len(self.candles)
         if candle_count == 0:
-            return self.candles.copy(), self.rsi_series.copy()
+            return self.candles.iloc[0:0], self.rsi_series.iloc[0:0]
 
         start_index, end_index = self._visible_candle_bounds()
-        visible_candles = self.candles.iloc[start_index:end_index].reset_index(drop=True)
+        visible_candles = self.candles.iloc[start_index:end_index]
         visible_candles.attrs["source_start_index"] = start_index
-        visible_rsi = self.rsi_series.iloc[start_index:end_index].reset_index(drop=True)
+        visible_rsi = self.rsi_series.iloc[start_index:end_index]
         return visible_candles, visible_rsi
 
     def _visible_candle_bounds(self):
@@ -671,16 +680,18 @@ class SmartTradeChart:
         default_start = max(0, candle_count - DEFAULT_VISIBLE_CANDLES)
         start_index = default_start
 
-        candle1_times = []
+        oldest_candle1_time = None
         for evaluated in self.fvg_gaps:
             try:
-                candle1_times.append(int(evaluated.gap.candle1_time))
+                candle1_time = int(evaluated.gap.candle1_time)
             except (AttributeError, TypeError, ValueError):
                 continue
+            if oldest_candle1_time is None or candle1_time < oldest_candle1_time:
+                oldest_candle1_time = candle1_time
 
-        if candle1_times:
-            candle_times = [int(value) for value in self.candles["time"]]
-            oldest_fvg_index = bisect_left(candle_times, min(candle1_times))
+        if oldest_candle1_time is not None:
+            candle_times = self.candles["time"].to_numpy(copy=False)
+            oldest_fvg_index = bisect_left(candle_times, oldest_candle1_time)
             fvg_start = max(0, oldest_fvg_index - FVG_LEFT_MARGIN_CANDLES)
             start_index = min(start_index, fvg_start)
 
@@ -705,7 +716,7 @@ class SmartTradeChart:
             self.fvg_overlay.clear_canvas(self.canvas)
             return
 
-        visible_times = [int(value) for value in visible_candles["time"]]
+        visible_times = visible_candles["time"].to_numpy(copy=False)
 
         def time_to_x(timestamp):
             timestamp = int(timestamp)
@@ -794,7 +805,7 @@ class SmartTradeChart:
 
         points = []
 
-        for index, value in visible_rsi.items():
+        for index, value in enumerate(visible_rsi.array):
 
             if pd.isna(value):
                 continue

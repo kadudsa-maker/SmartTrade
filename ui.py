@@ -1,4 +1,5 @@
 import customtkinter as ctk
+import math
 from queue import Empty, Queue
 import threading
 import time
@@ -10,6 +11,7 @@ from analysis_modes import (
     FVG_ON,
     FVG_ONLY,
     FVG_RSI,
+    MARKET_STRUCTURE,
     RSI_VIEW_OFF,
     RSI_VIEW_ON,
     RSI_VIEW_QUALITY_SORT,
@@ -50,6 +52,14 @@ from market import (
     reset_watchlist,
     save_watchlist
 )
+from market_structure import (
+    DivergenceDirection,
+    MarketStructureResult,
+    MarketStructureState,
+    SemanticColor,
+    evaluate_market_structure,
+    merge_price_pivots,
+)
 from pivots import find_pivots, find_rsi_pivots
 from rsi import calculate_rsi_series
 from scanner_state import next_scan_index, scan_mode_label
@@ -88,6 +98,21 @@ from strings import (
     WATCHLIST_SAVE_ERROR
 )
 from time_utils import current_polish_time, format_polish_time
+from trend_health import (
+    TrendHealthResult,
+    TrendHealthState,
+    evaluate_trend_health,
+    undefined_trend_health,
+)
+
+
+class _DivergenceResults(list):
+
+    def __init__(self, divergences, price_pivots, rsi_value=None):
+
+        super().__init__(divergences)
+        self.price_pivots = price_pivots
+        self.rsi_value = rsi_value
 
 
 def clamp_alert_quality(value):
@@ -105,9 +130,49 @@ RED = "#E74C3C"
 ORANGE = "#E67E22"
 BLUE = "#3498DB"
 GRAY = "#6E7681"
+YELLOW = "#D4A72C"
 CARD_HEIGHT = 62
+MARKET_STRUCTURE_CARD_HEIGHT = 72
 STATUS_FILTERED_COLOR = "#4B525C"
 RSI_QUALITY_PRIORITY_THRESHOLD = 65
+
+MARKET_STRUCTURE_STATE_TEXT = {
+    MarketStructureState.UPTREND: "Uptrend",
+    MarketStructureState.POTENTIAL_DISTRIBUTION: "Potential Distribution",
+    MarketStructureState.DOWNTREND_CONFIRMED: "Downtrend Confirmed",
+    MarketStructureState.DOWNTREND: "Downtrend",
+    MarketStructureState.POTENTIAL_ACCUMULATION: "Potential Accumulation",
+    MarketStructureState.UPTREND_CONFIRMED: "Uptrend Confirmed",
+    MarketStructureState.UNDEFINED: "Undefined",
+}
+MARKET_STRUCTURE_STATE_SEMANTICS = {
+    MarketStructureState.UPTREND: SemanticColor.POSITIVE,
+    MarketStructureState.POTENTIAL_DISTRIBUTION: SemanticColor.WARNING,
+    MarketStructureState.DOWNTREND_CONFIRMED: SemanticColor.NEGATIVE,
+    MarketStructureState.DOWNTREND: SemanticColor.NEGATIVE,
+    MarketStructureState.POTENTIAL_ACCUMULATION: SemanticColor.ACCUMULATION,
+    MarketStructureState.UPTREND_CONFIRMED: SemanticColor.POSITIVE,
+    MarketStructureState.UNDEFINED: SemanticColor.NEUTRAL,
+}
+MARKET_STRUCTURE_SEMANTIC_COLORS = {
+    SemanticColor.POSITIVE: GREEN,
+    SemanticColor.WARNING: YELLOW,
+    SemanticColor.NEGATIVE: RED,
+    SemanticColor.ACCUMULATION: ORANGE,
+    SemanticColor.NEUTRAL: GRAY,
+}
+TREND_HEALTH_STATE_TEXT = {
+    TrendHealthState.HEALTHY: "Healthy",
+    TrendHealthState.WEAKENING: "Weakening",
+    TrendHealthState.BREAKING: "Breaking",
+    TrendHealthState.UNDEFINED: "Undefined",
+}
+TREND_HEALTH_STATE_SEMANTICS = {
+    TrendHealthState.HEALTHY: SemanticColor.POSITIVE,
+    TrendHealthState.WEAKENING: SemanticColor.WARNING,
+    TrendHealthState.BREAKING: SemanticColor.NEGATIVE,
+    TrendHealthState.UNDEFINED: SemanticColor.NEUTRAL,
+}
 
 SCAN_MODE_WATCHLIST = "watchlist"
 SCAN_MODE_TOP_BYBIT = "top_bybit"
@@ -203,6 +268,11 @@ class SmartTradeUI:
         self.rsi_view_menu = None
         self.rsi_sort_mode = DEFAULT_RSI_SORT_MODE
         self.rsi_sort_mode_label = None
+        self.market_structure_filter_states = set(MARKET_STRUCTURE_STATE_TEXT)
+        self.market_structure_filter_vars = {}
+        self.market_structure_filter_checkboxes = {}
+        self.market_structure_filter_panel = None
+        self.analysis_top_bar = None
         self.refresh_index = 0
         self.last_top50_sort_at = 0
         self.last_top50_order = []
@@ -739,6 +809,8 @@ class SmartTradeUI:
             "status": status,
             "rsi": None,
             "divergence": None,
+            "market_structure": None,
+            "trend_health": None,
             "candle_count": 0,
             "quality": None,
             "candles_ago": None,
@@ -892,6 +964,8 @@ class SmartTradeUI:
                     "divergence": result["divergence"],
                     "candle_count": result["candle_count"],
                     "quality": result.get("quality"),
+                    "market_structure": result.get("market_structure"),
+                    "trend_health": result.get("trend_health"),
                     "scan_id": result["scan_id"],
                     "interval": result["interval"],
                     "analysis_mode": result["analysis_mode"],
@@ -910,7 +984,10 @@ class SmartTradeUI:
                     result["candle_count"],
                     fvg_result=result.get("fvg_result"),
                     fvg_status=result.get("fvg_status", ""),
-                    selected_fvg=result.get("selected_fvg")
+                    selected_fvg=result.get("selected_fvg"),
+                    market_structure=result.get("market_structure"),
+                    trend_health=result.get("trend_health"),
+                    quality=result.get("quality"),
                 )
 
             card = getattr(self, "cards_by_symbol", {}).get(symbol)
@@ -1212,7 +1289,64 @@ class SmartTradeUI:
             return False
         if capabilities.require_good_rsi and not self.has_good_rsi(record):
             return False
+        if self.current_analysis_mode() == MARKET_STRUCTURE:
+            market_structure = (
+                record.get("market_structure")
+                if isinstance(record, dict)
+                else None
+            )
+            if not self.is_market_structure_state_visible(market_structure):
+                return False
         return True
+
+    def active_market_structure_filter_states(self):
+
+        states = getattr(self, "market_structure_filter_states", None)
+        if states is None:
+            states = set(MARKET_STRUCTURE_STATE_TEXT)
+            self.market_structure_filter_states = states
+        return states
+
+    @staticmethod
+    def market_structure_filter_state(market_structure_or_state):
+
+        if isinstance(market_structure_or_state, MarketStructureState):
+            return market_structure_or_state
+        if isinstance(market_structure_or_state, MarketStructureResult):
+            state = market_structure_or_state.state
+            if isinstance(state, MarketStructureState):
+                return state
+        return MarketStructureState.UNDEFINED
+
+    def is_market_structure_state_visible(self, market_structure_or_state):
+
+        state = self.market_structure_filter_state(market_structure_or_state)
+        return state in self.active_market_structure_filter_states()
+
+    def set_market_structure_filter_state(self, state, enabled):
+
+        if not isinstance(state, MarketStructureState):
+            return False
+
+        states = self.active_market_structure_filter_states()
+        if enabled:
+            states.add(state)
+        else:
+            states.discard(state)
+
+        variable = getattr(self, "market_structure_filter_vars", {}).get(state)
+        if variable is not None and variable.get() != bool(enabled):
+            variable.set(bool(enabled))
+
+        self.apply_card_filters()
+        return True
+
+    def apply_market_structure_filter_checkbox(self, state):
+
+        variable = getattr(self, "market_structure_filter_vars", {}).get(state)
+        if variable is None:
+            return False
+        return self.set_market_structure_filter_state(state, variable.get())
 
     def apply_card_filter_to_card(self, card, record=None):
 
@@ -1606,18 +1740,36 @@ class SmartTradeUI:
                     )
 
             best_divergence = None
-            if capabilities.analyze_divergence:
+            market_structure_divergence = None
+            market_structure_quality = None
+            price_pivots = []
+            if (
+                capabilities.analyze_divergence
+                or capabilities.analyze_market_structure
+            ):
                 divergence_started_at = time.perf_counter()
                 divergences = self.find_coin_divergences_from_candles(candles)
+                price_pivots = getattr(divergences, "price_pivots", [])
                 self.perf_log("find_divergences", divergence_started_at, symbol=symbol)
 
                 select_started_at = time.perf_counter()
-                best_divergence = self.select_freshest_best_signal(
+                market_structure_divergence = self.select_freshest_best_signal(
                     divergences, len(candles)
                 )
                 self.perf_log("select_signal", select_started_at, symbol=symbol)
+                if capabilities.analyze_divergence:
+                    best_divergence = market_structure_divergence
+                if capabilities.analyze_market_structure:
+                    rsi = getattr(divergences, "rsi_value", None)
+                    quality = (
+                        market_structure_divergence.get("quality")
+                        if isinstance(market_structure_divergence, dict)
+                        else None
+                    )
+                    if quality:
+                        market_structure_quality = calculate_quality_score(quality)
 
-            quality_score = None
+            quality_score = market_structure_quality
             candles_ago = None
             signal_status = ""
             ui_visible = False
@@ -1627,10 +1779,31 @@ class SmartTradeUI:
                 signal_status, _status_color = self.signal_status(best_divergence, len(candles))
                 ui_visible = self.is_visible_signal(best_divergence, len(candles))
 
+            market_structure_result = self.evaluate_passive_market_structure(
+                price_pivots,
+                market_structure_divergence,
+                rsi,
+                timeframe=interval,
+            )
+            trend_health_divergence = (
+                self.active_trend_health_divergence_direction(
+                    market_structure_divergence,
+                    len(candles),
+                )
+            )
+            trend_health_result = self.evaluate_passive_trend_health(
+                market_structure_result,
+                self.last_closed_candle_close(candles, interval),
+                trend_health_divergence,
+                rsi,
+            )
+
             result_fields = {
                     "status": "signal_found" if best_divergence is not None else "no_signal",
                     "rsi": rsi,
                     "divergence": best_divergence,
+                    "market_structure": market_structure_result,
+                    "trend_health": trend_health_result,
                     "candle_count": len(candles),
                     "quality": quality_score,
                     "candles_ago": candles_ago,
@@ -1710,7 +1883,7 @@ class SmartTradeUI:
             right=PIVOT_RIGHT
         )
 
-        return find_regular_divergences(
+        divergences = find_regular_divergences(
             candles,
             rsi_series,
             price_pivot_highs,
@@ -1718,6 +1891,91 @@ class SmartTradeUI:
             rsi_pivot_highs,
             rsi_pivot_lows
         )
+        price_pivots = merge_price_pivots(
+            price_pivot_highs,
+            price_pivot_lows,
+            timeframe=candles.attrs.get("timeframe"),
+        )
+        valid_rsi = rsi_series.dropna()
+        rsi_value = (
+            round(float(valid_rsi.iloc[-1]), 2)
+            if not valid_rsi.empty
+            else None
+        )
+
+        return _DivergenceResults(divergences, price_pivots, rsi_value)
+
+    @staticmethod
+    def market_structure_divergence_direction(divergence):
+
+        if divergence is None:
+            return None
+
+        return {
+            "bullish": DivergenceDirection.BULLISH,
+            "bearish": DivergenceDirection.BEARISH,
+        }.get(divergence.get("type"))
+
+    def evaluate_passive_market_structure(
+        self,
+        price_pivots,
+        divergence,
+        rsi_value,
+        timeframe=None,
+    ):
+
+        divergence_direction = self.market_structure_divergence_direction(
+            divergence
+        )
+
+        try:
+            return evaluate_market_structure(
+                price_pivots,
+                divergence_direction=divergence_direction,
+                rsi_value=rsi_value,
+                timeframe=timeframe,
+            )
+        except Exception:
+            return None
+
+    def active_trend_health_divergence_direction(
+        self,
+        divergence,
+        candle_count,
+    ):
+
+        if divergence is None:
+            return None
+
+        try:
+            status, _color = self.signal_status(divergence, candle_count)
+        except (KeyError, TypeError, ValueError):
+            return None
+        if status not in {"ACTIVE", "AGING"}:
+            return None
+        return self.market_structure_divergence_direction(divergence)
+
+    @staticmethod
+    def evaluate_passive_trend_health(
+        market_structure,
+        last_closed_close,
+        divergence_direction,
+        rsi_value,
+    ):
+
+        try:
+            return evaluate_trend_health(
+                market_structure,
+                last_closed_close=last_closed_close,
+                divergence_direction=divergence_direction,
+                rsi_value=rsi_value,
+            )
+        except Exception as error:
+            print(
+                "Trend Health evaluation failed: "
+                f"{type(error).__name__}: {error}"
+            )
+            return undefined_trend_health("Trend Health unavailable")
 
     def select_freshest_best_signal(self, divergences, candle_count=None, visible_only=False):
 
@@ -1806,6 +2064,9 @@ class SmartTradeUI:
         return priorities.get(status, 0), freshness, quality_score, rsi
 
     def analysis_mode_sort_key(self, result):
+
+        if self.current_analysis_mode() == MARKET_STRUCTURE:
+            return (0,)
 
         profile = self.current_analysis_capabilities().sort_profile
         if profile == "standard":
@@ -1937,13 +2198,15 @@ class SmartTradeUI:
         if rsi_view_option is not None:
             rsi_view_option.set(option)
 
+        self.update_market_structure_filter_panel_visibility()
+
         if option == RSI_VIEW_OFF:
             self.rsi_sort_mode = RSI_SORT_MODE_QUALITY
         elif option == RSI_VIEW_SORT:
             self.rsi_sort_mode = RSI_SORT_MODE_RSI
         elif option == RSI_VIEW_QUALITY_SORT:
             self.rsi_sort_mode = RSI_SORT_MODE_RSI_QUALITY
-        elif option in (FVG_ON, FVG_ONLY, FVG_RSI):
+        elif option in (FVG_ON, FVG_ONLY, FVG_RSI, MARKET_STRUCTURE):
             self.rsi_sort_mode = RSI_SORT_MODE_QUALITY
 
         self.update_rsi_sort_mode_label()
@@ -1959,6 +2222,9 @@ class SmartTradeUI:
         self.last_top50_order = []
         self.last_card_texts = {}
         self.clear_chart_fvg()
+
+        for card in getattr(self, "buttons", []):
+            self.update_market_structure_card_section(card)
 
         if getattr(self, "watchlist_scroll", None) is not None:
             self.clear_watchlist_cards()
@@ -2085,8 +2351,7 @@ class SmartTradeUI:
             if content is None:
                 self.configure_label_if_changed(header, text="")
                 self.configure_label_if_changed(detail, text="")
-                if cell.winfo_ismapped():
-                    cell.grid_remove()
+                cell.grid_remove()
                 return True
 
             self.configure_label_if_changed(
@@ -2125,6 +2390,9 @@ class SmartTradeUI:
         fvg_result=None,
         fvg_status="",
         selected_fvg=None,
+        market_structure=None,
+        trend_health=None,
+        quality=None,
     ):
 
         if index < 0 or index >= len(self.buttons):
@@ -2147,6 +2415,13 @@ class SmartTradeUI:
             fvg_result=fvg_result,
             fvg_status=fvg_status,
             selected_fvg=selected_fvg,
+        )
+        self.update_market_structure_card_section(
+            card,
+            market_structure,
+            trend_health=trend_health,
+            rsi=rsi,
+            quality=quality,
         )
         self.update_card_analysis_visibility(card)
 
@@ -2233,13 +2508,199 @@ class SmartTradeUI:
             if not rsi_cell.winfo_ismapped():
                 rsi_cell.grid()
         else:
-            if rsi_cell.winfo_ismapped():
-                rsi_cell.grid_remove()
+            rsi_cell.grid_remove()
+
+    def market_structure_card_content(self, market_structure):
+
+        if isinstance(market_structure, MarketStructureResult):
+            state = market_structure.state
+            reason = market_structure.reason
+        else:
+            state = MarketStructureState.UNDEFINED
+            reason = ""
+
+        if state not in MARKET_STRUCTURE_STATE_TEXT:
+            state = MarketStructureState.UNDEFINED
+
+        reason = self.compact_market_structure_reason(reason)
+        semantic_color = MARKET_STRUCTURE_STATE_SEMANTICS[state]
+
+        return {
+            "state": MARKET_STRUCTURE_STATE_TEXT[state],
+            "color": MARKET_STRUCTURE_SEMANTIC_COLORS[semantic_color],
+            "reason": reason,
+        }
+
+    def trend_health_card_content(self, trend_health):
+
+        if isinstance(trend_health, TrendHealthResult):
+            state = trend_health.state
+            reason = trend_health.reason
+        else:
+            state = TrendHealthState.UNDEFINED
+            reason = ""
+
+        if state not in TREND_HEALTH_STATE_TEXT:
+            state = TrendHealthState.UNDEFINED
+
+        reason = self.compact_market_structure_reason(reason)
+        semantic_color = TREND_HEALTH_STATE_SEMANTICS[state]
+
+        return {
+            "state": TREND_HEALTH_STATE_TEXT[state],
+            "color": MARKET_STRUCTURE_SEMANTIC_COLORS[semantic_color],
+            "reason": reason,
+        }
+
+    @staticmethod
+    def compact_market_structure_reason(reason, max_chars=42):
+
+        reason = " ".join(reason.split()) if isinstance(reason, str) else ""
+        if len(reason) <= max_chars:
+            return reason
+        return f"{reason[:max_chars - 3].rstrip()}..."
+
+    def update_market_structure_card_section(
+        self,
+        card,
+        market_structure=None,
+        *,
+        trend_health=None,
+        rsi=None,
+        quality=None,
+    ):
+
+        cell = card.get("market_structure_cell")
+        status = card.get("market_structure_status")
+        reason = card.get("market_structure_reason")
+        rsi_label = card.get("market_structure_rsi")
+        quality_label = card.get("market_structure_quality")
+        trend_status = card.get("trend_health_status")
+        trend_reason = card.get("trend_health_reason")
+        if (
+            cell is None
+            or status is None
+            or reason is None
+        ):
+            return False
+
+        try:
+            if hasattr(cell, "winfo_exists") and not cell.winfo_exists():
+                return False
+
+            content = self.market_structure_card_content(market_structure)
+            health_content = self.trend_health_card_content(trend_health)
+            self.configure_label_if_changed(
+                status,
+                text=content["state"],
+                text_color=content["color"],
+            )
+            self.configure_label_if_changed(
+                reason,
+                text=content["reason"],
+                text_color=MUTED_TEXT_COLOR,
+            )
+            if rsi_label is not None:
+                self.configure_label_if_changed(
+                    rsi_label,
+                    text=self.format_market_structure_rsi(rsi),
+                    text_color=TEXT_COLOR,
+                )
+            if quality_label is not None:
+                self.configure_label_if_changed(
+                    quality_label,
+                    text=self.format_market_structure_quality(quality),
+                    text_color=TEXT_COLOR,
+                )
+            if content["reason"]:
+                if not reason.winfo_ismapped():
+                    reason.grid()
+            elif reason.winfo_ismapped():
+                reason.grid_remove()
+            if trend_status is not None:
+                self.configure_label_if_changed(
+                    trend_status,
+                    text=health_content["state"],
+                    text_color=health_content["color"],
+                )
+            if trend_reason is not None:
+                self.configure_label_if_changed(
+                    trend_reason,
+                    text=health_content["reason"],
+                    text_color=MUTED_TEXT_COLOR,
+                )
+                if health_content["reason"]:
+                    if not trend_reason.winfo_ismapped():
+                        trend_reason.grid()
+                elif trend_reason.winfo_ismapped():
+                    trend_reason.grid_remove()
+
+            self.update_market_structure_card_visibility(card)
+            return True
+        except (AttributeError, TclError) as error:
+            print(
+                "Market Structure card section update skipped: "
+                f"{type(error).__name__}: {error}"
+            )
+            return False
+
+    def format_market_structure_rsi(self, rsi):
+
+        if isinstance(rsi, bool):
+            return "—"
+        try:
+            value = float(rsi)
+        except (TypeError, ValueError):
+            return "—"
+        if not math.isfinite(value):
+            return "—"
+        return self.format_rsi_text(value)
+
+    @staticmethod
+    def format_market_structure_quality(quality):
+
+        if isinstance(quality, bool) or quality is None:
+            return "—"
+        try:
+            numeric_quality = float(quality)
+        except (TypeError, ValueError):
+            return "—"
+        if not math.isfinite(numeric_quality):
+            return "—"
+        return str(quality)
+
+    def update_market_structure_card_visibility(self, card):
+
+        cell = card.get("market_structure_cell")
+        if cell is None:
+            return
+
+        show_section = self.current_analysis_mode() == MARKET_STRUCTURE
+        frame = card.get("frame")
+        if frame is not None:
+            try:
+                frame.configure(
+                    height=(
+                        MARKET_STRUCTURE_CARD_HEIGHT
+                        if show_section
+                        else CARD_HEIGHT
+                    )
+                )
+            except (AttributeError, TclError):
+                pass
+        if show_section:
+            if not cell.winfo_ismapped():
+                cell.grid()
+        else:
+            cell.grid_remove()
 
     def update_card_analysis_visibility(self, card):
 
         capabilities = self.current_analysis_capabilities()
         show_standard = capabilities.analyze_divergence
+        show_market_structure = (
+            self.current_analysis_mode() == MARKET_STRUCTURE
+        )
         frame = card.get("frame")
         cells = card.get("analysis_cells", {})
         for name, column, minsize in (
@@ -2254,13 +2715,23 @@ class SmartTradeUI:
             if show_standard:
                 if not cell.winfo_ismapped():
                     cell.grid()
-            elif cell.winfo_ismapped():
+            else:
                 cell.grid_remove()
             if frame is not None and hasattr(frame, "grid_columnconfigure"):
                 frame.grid_columnconfigure(column, minsize=minsize if show_standard else 0)
         if frame is not None and hasattr(frame, "grid_columnconfigure"):
             frame.grid_columnconfigure(3, minsize=48 if capabilities.analyze_rsi else 0)
+            frame.grid_columnconfigure(
+                0,
+                weight=0 if show_market_structure else 1,
+                minsize=88,
+            )
+            frame.grid_columnconfigure(
+                6,
+                weight=1 if show_market_structure else 0,
+            )
         self.update_rsi_card_visibility(card)
+        self.update_market_structure_card_visibility(card)
 
     def configure_card_label_if_present(self, card, key, **options):
 
@@ -2430,6 +2901,39 @@ class SmartTradeUI:
 
         return candles.sort_values("time").reset_index(drop=True)
 
+    @staticmethod
+    def last_closed_candle_close(candles, interval, now_seconds=None):
+
+        try:
+            interval_seconds = FVG_INTERVAL_SECONDS[interval]
+        except KeyError:
+            return None
+        if candles is None or candles.empty:
+            return None
+
+        try:
+            current_time = (
+                time.time()
+                if now_seconds is None
+                else float(now_seconds)
+            )
+            closed = candles[
+                candles["time"].astype(float) + interval_seconds
+                <= current_time
+            ]
+        except (KeyError, TypeError, ValueError):
+            return None
+        if closed.empty:
+            return None
+
+        try:
+            close = float(closed.iloc[-1]["close"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        if not math.isfinite(close):
+            return None
+        return close
+
     def prepare_fvg_candles(self, candles, interval, now_seconds=None):
 
         fvg_candles = tuple(
@@ -2543,6 +3047,17 @@ class SmartTradeUI:
         labels["fvg_cell"] = fvg_cell
         labels["fvg_header"] = fvg_header
         labels["fvg_detail"] = fvg_detail
+        (
+            labels["market_structure_cell"],
+            labels["market_structure_status"],
+            labels["market_structure_reason"],
+            labels["trend_health_status"],
+            labels["trend_health_reason"],
+            labels["market_structure_rsi_title"],
+            labels["market_structure_rsi"],
+            labels["market_structure_quality_title"],
+            labels["market_structure_quality"],
+        ) = self.create_market_structure_card_section(frame)
         labels["frame"] = frame
         self.update_card_analysis_visibility(labels)
 
@@ -2589,6 +3104,138 @@ class SmartTradeUI:
         detail.grid(row=1, column=0, sticky="ew", pady=(1, 0))
         cell.grid_remove()
         return cell, header, detail
+
+    def create_market_structure_card_section(self, parent):
+
+        cell = ctk.CTkFrame(parent, fg_color="transparent")
+        cell.grid(
+            row=0,
+            column=1,
+            columnspan=6,
+            rowspan=2,
+            sticky="nsew",
+            padx=(6, 10),
+            pady=5,
+        )
+        cell.grid_columnconfigure(0, weight=4)
+        cell.grid_columnconfigure(1, weight=4)
+        cell.grid_columnconfigure(2, weight=1, minsize=46)
+        cell.grid_columnconfigure(3, weight=1, minsize=54)
+
+        title = ctk.CTkLabel(
+            cell,
+            text="Market Structure",
+            font=("Arial", 8, "bold"),
+            text_color=GRAY,
+            anchor="w",
+            height=10,
+        )
+        title.grid(row=0, column=0, sticky="ew")
+
+        status = ctk.CTkLabel(
+            cell,
+            text="Undefined",
+            font=("Arial", 10, "bold"),
+            text_color=GRAY,
+            anchor="w",
+            height=14,
+        )
+        status.grid(row=1, column=0, sticky="ew")
+
+        reason = ctk.CTkLabel(
+            cell,
+            text="",
+            font=("Arial", 8, "normal"),
+            text_color=MUTED_TEXT_COLOR,
+            anchor="w",
+            height=10,
+        )
+        reason.grid(row=2, column=0, sticky="ew")
+        reason.grid_remove()
+
+        trend_title = ctk.CTkLabel(
+            cell,
+            text="Trend Health",
+            font=("Arial", 8, "bold"),
+            text_color=GRAY,
+            anchor="w",
+            height=10,
+        )
+        trend_title.grid(row=0, column=1, sticky="ew", padx=(8, 0))
+
+        trend_status = ctk.CTkLabel(
+            cell,
+            text="Undefined",
+            font=("Arial", 10, "bold"),
+            text_color=GRAY,
+            anchor="w",
+            height=14,
+        )
+        trend_status.grid(row=1, column=1, sticky="ew", padx=(8, 0))
+
+        trend_reason = ctk.CTkLabel(
+            cell,
+            text="",
+            font=("Arial", 8, "normal"),
+            text_color=MUTED_TEXT_COLOR,
+            anchor="w",
+            height=10,
+        )
+        trend_reason.grid(row=2, column=1, sticky="ew", padx=(8, 0))
+        trend_reason.grid_remove()
+
+        rsi_title = ctk.CTkLabel(
+            cell,
+            text="RSI",
+            font=("Arial", 8, "bold"),
+            text_color=GRAY,
+            anchor="w",
+            height=10,
+        )
+        rsi_title.grid(row=0, column=2, sticky="ew", padx=(8, 0))
+
+        rsi = ctk.CTkLabel(
+            cell,
+            text="—",
+            font=("Arial", 10, "normal"),
+            text_color=TEXT_COLOR,
+            anchor="w",
+            height=14,
+        )
+        rsi.grid(row=1, column=2, sticky="ew", padx=(8, 0))
+
+        quality_title = ctk.CTkLabel(
+            cell,
+            text="Quality",
+            font=("Arial", 8, "bold"),
+            text_color=GRAY,
+            anchor="w",
+            height=10,
+        )
+        quality_title.grid(row=0, column=3, sticky="ew", padx=(8, 0))
+
+        quality = ctk.CTkLabel(
+            cell,
+            text="—",
+            font=("Arial", 10, "normal"),
+            text_color=TEXT_COLOR,
+            anchor="w",
+            height=14,
+        )
+        quality.grid(row=1, column=3, sticky="ew", padx=(8, 0))
+
+        cell.grid_remove()
+        return (
+            cell,
+            status,
+            reason,
+            trend_status,
+            trend_reason,
+            rsi_title,
+            rsi,
+            quality_title,
+            quality,
+        )
 
     def create_card_value(self, parent, column, title, value, color):
 
@@ -2863,7 +3510,10 @@ class SmartTradeUI:
                         result["candle_count"],
                         fvg_result=result.get("fvg_result"),
                         fvg_status=result.get("fvg_status", ""),
-                        selected_fvg=result.get("selected_fvg")
+                        selected_fvg=result.get("selected_fvg"),
+                        market_structure=result.get("market_structure"),
+                        trend_health=result.get("trend_health"),
+                        quality=result.get("quality"),
                     )
 
         if self.current_analysis_capabilities().require_fvg:
@@ -2976,7 +3626,10 @@ class SmartTradeUI:
             result["candle_count"],
             fvg_result=result.get("fvg_result"),
             fvg_status=result.get("fvg_status", ""),
-            selected_fvg=result.get("selected_fvg")
+            selected_fvg=result.get("selected_fvg"),
+            market_structure=result.get("market_structure"),
+            trend_health=result.get("trend_health"),
+            quality=result.get("quality"),
         )
         if card_created:
             self.refresh_card_positions()
@@ -3071,7 +3724,10 @@ class SmartTradeUI:
                     result["candle_count"],
                     fvg_result=result.get("fvg_result"),
                     fvg_status=result.get("fvg_status", ""),
-                    selected_fvg=result.get("selected_fvg")
+                    selected_fvg=result.get("selected_fvg"),
+                    market_structure=result.get("market_structure"),
+                    trend_health=result.get("trend_health"),
+                    quality=result.get("quality"),
                 )
 
         self.apply_card_filters()
@@ -3232,6 +3888,7 @@ class SmartTradeUI:
         )
         top_bar.pack(fill="x", padx=10, pady=(0, 10))
         top_bar.pack_propagate(False)
+        self.analysis_top_bar = top_bar
 
         self.top_time_label = ctk.CTkLabel(
             top_bar,
@@ -3341,6 +3998,76 @@ class SmartTradeUI:
             text_color=MUTED_TEXT_COLOR
         )
         self.rsi_sort_mode_label.pack(side="right", padx=(0, 8))
+
+    def build_market_structure_filter_panel(self):
+
+        panel = ctk.CTkFrame(
+            self.center,
+            fg_color=PANEL_COLOR,
+            border_color=BORDER_COLOR,
+            border_width=1,
+            corner_radius=10,
+        )
+        self.market_structure_filter_panel = panel
+
+        ctk.CTkLabel(
+            panel,
+            text="Market Structure Filter",
+            font=("Arial", 11, "bold"),
+            text_color=MUTED_TEXT_COLOR,
+        ).pack(anchor="w", padx=12, pady=(6, 2))
+
+        states = self.active_market_structure_filter_states()
+        self.market_structure_filter_vars = {}
+        self.market_structure_filter_checkboxes = {}
+        checkbox_rows = [
+            ctk.CTkFrame(panel, fg_color="transparent"),
+            ctk.CTkFrame(panel, fg_color="transparent"),
+        ]
+        for row in checkbox_rows:
+            row.pack(fill="x", padx=12, pady=(0, 3))
+
+        for index, state in enumerate(MarketStructureState):
+            variable = BooleanVar(value=state in states)
+            self.market_structure_filter_vars[state] = variable
+            checkbox = self.create_alert_checkbox(
+                checkbox_rows[0 if index < 4 else 1],
+                MARKET_STRUCTURE_STATE_TEXT[state],
+                variable,
+                compact=True,
+                command=(
+                    lambda selected_state=state:
+                    self.apply_market_structure_filter_checkbox(selected_state)
+                ),
+            )
+            self.market_structure_filter_checkboxes[state] = checkbox
+
+        self.update_market_structure_filter_panel_visibility()
+
+    def update_market_structure_filter_panel_visibility(self):
+
+        panel = getattr(self, "market_structure_filter_panel", None)
+        if panel is None:
+            return
+
+        show_panel = self.current_analysis_mode() == MARKET_STRUCTURE
+        try:
+            is_visible = bool(panel.winfo_ismapped())
+        except AttributeError:
+            is_visible = False
+
+        if show_panel and not is_visible:
+            pack_options = {
+                "fill": "x",
+                "padx": 10,
+                "pady": (0, 10),
+            }
+            top_bar = getattr(self, "analysis_top_bar", None)
+            if top_bar is not None:
+                pack_options["after"] = top_bar
+            panel.pack(**pack_options)
+        elif not show_panel and is_visible:
+            panel.pack_forget()
 
 
     def update_open_chart_status(self, refreshed_at):
@@ -3675,7 +4402,15 @@ class SmartTradeUI:
             text_color=MUTED_TEXT_COLOR
         ).pack(anchor="w", padx=14, pady=(8, 4))
 
-    def create_alert_checkbox(self, parent, text, variable, compact=False, packed=True):
+    def create_alert_checkbox(
+        self,
+        parent,
+        text,
+        variable,
+        compact=False,
+        packed=True,
+        command=None,
+    ):
 
         checkbox = ctk.CTkCheckBox(
             parent,
@@ -3684,7 +4419,8 @@ class SmartTradeUI:
             fg_color=BLUE,
             border_color=BORDER_COLOR,
             hover_color=BORDER_COLOR,
-            text_color=TEXT_COLOR
+            text_color=TEXT_COLOR,
+            command=command,
         )
 
         if packed:
@@ -3762,6 +4498,7 @@ class SmartTradeUI:
         self.update_scan_mode_buttons()
 
         self.build_top_bar()
+        self.build_market_structure_filter_panel()
         self.build_timeframe_bar()
 
         self.chart = SmartTradeChart(self.center)

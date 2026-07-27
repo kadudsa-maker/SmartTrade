@@ -227,3 +227,14 @@ def test_gui_zoom_and_pan_handlers_do_not_request_data():
     chart._on_drag_motion(SimpleNamespace(x=600))
     chart._on_drag_end(SimpleNamespace())
     assert chart.view_mode == VIEW_MODE_MANUAL
+
+
+def test_drag_repaints_only_when_visible_candle_offset_changes():
+    chart = view_chart(300)
+    chart.canvas = FakeCanvas()
+    redraws = []
+    chart._draw = lambda: redraws.append(True)
+    chart._on_drag_start(SimpleNamespace(x=500))
+    chart._on_drag_motion(SimpleNamespace(x=510))
+    chart._on_drag_motion(SimpleNamespace(x=511))
+    assert redraws == [True]

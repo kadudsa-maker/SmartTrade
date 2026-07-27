@@ -10,6 +10,7 @@ RSI_VIEW_QUALITY_SORT = "RSI + Quality Sort"
 FVG_ON = "FVG ON"
 FVG_ONLY = "FVG ONLY"
 FVG_RSI = "FVG + RSI"
+MARKET_STRUCTURE = "Market Structure"
 
 ANALYSIS_MODE_OPTIONS = (
     RSI_VIEW_ON,
@@ -19,6 +20,7 @@ ANALYSIS_MODE_OPTIONS = (
     FVG_ON,
     FVG_ONLY,
     FVG_RSI,
+    MARKET_STRUCTURE,
 )
 
 
@@ -31,6 +33,7 @@ class AnalysisCapabilities:
     require_fvg: bool = False
     require_good_rsi: bool = False
     sort_profile: str = "standard"
+    analyze_market_structure: bool = False
 
 
 STANDARD_CAPABILITIES = AnalysisCapabilities(
@@ -62,6 +65,13 @@ MODE_CAPABILITIES = {
         analyze_divergence=False,
         analyze_quality=False,
         sort_profile="fvg_rsi",
+    ),
+    MARKET_STRUCTURE: AnalysisCapabilities(
+        analyze_fvg=False,
+        analyze_rsi=False,
+        analyze_divergence=False,
+        analyze_quality=False,
+        analyze_market_structure=True,
     ),
 }
 
