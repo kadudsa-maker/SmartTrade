@@ -5,6 +5,7 @@ import pytest
 
 import chart as chart_module
 from chart import (
+    CROSSHAIR_CANVAS_TAG,
     MIN_MANUAL_VISIBLE_CANDLES,
     VIEW_MODE_AUTO,
     VIEW_MODE_MANUAL,
@@ -22,6 +23,14 @@ class FakeCanvas:
     def __init__(self, *_args, **_kwargs):
         self.bindings = {}
         self.width = 1000
+        self.height = 600
+        self.idle_callbacks = {}
+        self.next_after_id = 1
+        self.cancelled_after_ids = []
+        self.deleted = []
+        self.lines = []
+        self.rectangles = []
+        self.texts = []
 
     def pack(self, **_kwargs):
         pass
@@ -31,6 +40,37 @@ class FakeCanvas:
 
     def winfo_width(self):
         return self.width
+
+    def winfo_height(self):
+        return self.height
+
+    def after_idle(self, callback):
+        after_id = f"after-{self.next_after_id}"
+        self.next_after_id += 1
+        self.idle_callbacks[after_id] = callback
+        return after_id
+
+    def after_cancel(self, after_id):
+        self.cancelled_after_ids.append(after_id)
+        self.idle_callbacks.pop(after_id, None)
+
+    def run_idle_callbacks(self):
+        callbacks = list(self.idle_callbacks.values())
+        self.idle_callbacks.clear()
+        for callback in callbacks:
+            callback()
+
+    def delete(self, target):
+        self.deleted.append(target)
+
+    def create_line(self, *coordinates, **options):
+        self.lines.append((coordinates, options))
+
+    def create_rectangle(self, *coordinates, **options):
+        self.rectangles.append((coordinates, options))
+
+    def create_text(self, *coordinates, **options):
+        self.texts.append((coordinates, options))
 
 
 class FakeFrame:
@@ -177,6 +217,30 @@ def test_same_context_data_refresh_preserves_manual_mode(monkeypatch):
     assert end - start == manual_count
 
 
+def test_tk_data_refresh_invalidates_but_does_not_build_plotly(monkeypatch):
+    chart = view_chart()
+    configure_lightweight_refresh(chart, monkeypatch)
+    chart.figure = object()
+    chart._update_figure = lambda: pytest.fail("eager Plotly build")
+
+    chart.set_candles(frame(151), fvg_gaps=())
+
+    assert chart.figure is None
+
+
+def test_plotly_figure_remains_available_as_an_explicit_lazy_build():
+    chart = view_chart()
+    marker = object()
+    chart.figure = None
+
+    def build():
+        chart.figure = marker
+
+    chart._update_figure = build
+
+    assert chart.build_plotly_figure() is marker
+
+
 def test_double_click_reset_restores_auto_fvg_window():
     chart = view_chart(150, [evaluated(50)])
     chart._draw = lambda: None
@@ -237,4 +301,78 @@ def test_drag_repaints_only_when_visible_candle_offset_changes():
     chart._on_drag_start(SimpleNamespace(x=500))
     chart._on_drag_motion(SimpleNamespace(x=510))
     chart._on_drag_motion(SimpleNamespace(x=511))
+    assert redraws == [True]
+
+
+def test_mouse_motion_coalesces_to_one_lightweight_crosshair_redraw():
+    chart = view_chart(300)
+    chart.canvas = FakeCanvas()
+    chart.crosshair_x = None
+    chart.crosshair_y = None
+    chart._crosshair_after_id = None
+    chart._crosshair_context = {
+        "width": 1000,
+        "top": 28,
+        "bottom": 572,
+        "padding": 28,
+        "high": 101,
+        "low": 99,
+        "price_top": 28,
+        "price_height": 400,
+    }
+    chart._draw = lambda *_args: pytest.fail("full chart redraw")
+
+    for index in range(100):
+        chart._on_mouse_move(SimpleNamespace(x=100 + index, y=200 + index))
+
+    assert len(chart.canvas.idle_callbacks) == 1
+    assert chart.canvas.lines == []
+    chart.canvas.run_idle_callbacks()
+
+    assert chart.crosshair_x == 199
+    assert chart.crosshair_y == 299
+    assert chart.canvas.deleted == [CROSSHAIR_CANVAS_TAG]
+    assert len(chart.canvas.lines) == 2
+    assert len(chart.canvas.rectangles) == 1
+    assert len(chart.canvas.texts) == 1
+    assert all(
+        options["tags"] == (CROSSHAIR_CANVAS_TAG,)
+        for _coordinates, options in (
+            chart.canvas.lines + chart.canvas.rectangles + chart.canvas.texts
+        )
+    )
+
+
+def test_mouse_leave_cancels_pending_redraw_and_removes_only_crosshair():
+    chart = view_chart()
+    chart.canvas = FakeCanvas()
+    chart.crosshair_x = 200
+    chart.crosshair_y = 300
+    chart._crosshair_after_id = None
+    chart._crosshair_context = None
+    chart._on_mouse_move(SimpleNamespace(x=220, y=320))
+    pending_id = chart._crosshair_after_id
+
+    chart._on_mouse_leave(SimpleNamespace())
+
+    assert chart.crosshair_x is None
+    assert chart.crosshair_y is None
+    assert chart._crosshair_after_id is None
+    assert chart.canvas.cancelled_after_ids == [pending_id]
+    assert chart.canvas.deleted == [CROSSHAIR_CANVAS_TAG]
+    assert chart.canvas.idle_callbacks == {}
+
+
+def test_resize_events_are_coalesced_to_one_full_redraw():
+    chart = view_chart()
+    chart.canvas = FakeCanvas()
+    chart._draw_after_id = None
+    redraws = []
+    chart._draw = lambda *_args: redraws.append(True)
+
+    for _index in range(100):
+        chart._on_canvas_configure(SimpleNamespace())
+
+    assert len(chart.canvas.idle_callbacks) == 1
+    chart.canvas.run_idle_callbacks()
     assert redraws == [True]

@@ -297,6 +297,7 @@ def test_chart_set_fvg_gaps_skips_duplicate_redraw():
     chart = SmartTradeChart.__new__(SmartTradeChart)
     chart.fvg_overlay = FVGChartOverlay()
     chart.fvg_gaps = ()
+    chart.figure = object()
     chart._last_source_key = "old"
     redraws = []
     chart._update_figure = lambda: redraws.append("figure")
@@ -304,20 +305,23 @@ def test_chart_set_fvg_gaps_skips_duplicate_redraw():
     gap = evaluated()
     chart.set_fvg_gaps([gap])
     chart.set_fvg_gaps([gap])
-    assert redraws == ["figure", "canvas"]
+    assert redraws == ["canvas"]
+    assert chart.figure is None
 
 
 def test_chart_set_fvg_gaps_empty_removes_previous_overlay():
     chart = SmartTradeChart.__new__(SmartTradeChart)
     chart.fvg_overlay = FVGChartOverlay()
     chart.fvg_gaps = (evaluated(),)
+    chart.figure = object()
     chart._last_source_key = "old"
     redraws = []
     chart._update_figure = lambda: redraws.append("figure")
     chart._draw = lambda: redraws.append("canvas")
     chart.set_fvg_gaps(())
     assert chart.fvg_gaps == ()
-    assert redraws == ["figure", "canvas"]
+    assert redraws == ["canvas"]
+    assert chart.figure is None
 
 
 def test_plotly_refresh_replaces_old_fvg_shapes():

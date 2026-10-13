@@ -29,6 +29,7 @@ MAX_VISIBLE_CANDLES = 200
 MIN_MANUAL_VISIBLE_CANDLES = 24
 VIEW_MODE_AUTO = "AUTO"
 VIEW_MODE_MANUAL = "MANUAL"
+CROSSHAIR_CANVAS_TAG = "smarttrade_crosshair"
 
 class SmartTradeChart:
 
@@ -42,7 +43,7 @@ class SmartTradeChart:
             corner_radius=10
         )
 
-        self.figure = go.Figure()
+        self.figure = None
         self.candles = pd.DataFrame()
         self.rsi_period = 14
         self.rsi_series = pd.Series(dtype=float)
@@ -61,6 +62,9 @@ class SmartTradeChart:
         self._drag_start_x = None
         self._drag_start_bounds = None
         self._last_drag_candle_delta = None
+        self._draw_after_id = None
+        self._crosshair_after_id = None
+        self._crosshair_context = None
 
         self.canvas = tk.Canvas(
             self.frame,
@@ -72,7 +76,7 @@ class SmartTradeChart:
         self.crosshair_x = None
         self.crosshair_y = None
 
-        self.canvas.bind("<Configure>", self._draw)
+        self.canvas.bind("<Configure>", self._on_canvas_configure)
         self.canvas.bind("<Motion>", self._on_mouse_move)
         self.canvas.bind("<Leave>", self._on_mouse_leave)
         self.canvas.bind("<MouseWheel>", self._on_mouse_wheel)
@@ -82,8 +86,6 @@ class SmartTradeChart:
         self.canvas.bind("<B1-Motion>", self._on_drag_motion)
         self.canvas.bind("<ButtonRelease-1>", self._on_drag_end)
         self.canvas.bind("<Double-Button-1>", self._on_view_reset)
-
-        self._configure_figure()
 
     def pack(self, **kwargs):
 
@@ -126,6 +128,7 @@ class SmartTradeChart:
 
         self.candles = self._prepare_candles(df)
         self.fvg_gaps = fvg_gaps
+        self.figure = None
         self.rsi_series = self._calculate_rsi(self.candles["close"])
         self.pivot_highs, self.pivot_lows = find_pivots(
             self.candles,
@@ -148,12 +151,10 @@ class SmartTradeChart:
         )
 
         if self.candles.empty:
-            self._update_figure()
             self._draw()
             self._last_source_key = source_key
             return
 
-        self._update_figure()
         self._draw()
         self._last_source_key = source_key
 
@@ -172,9 +173,14 @@ class SmartTradeChart:
             return
 
         self.fvg_gaps = fvg_gaps
+        self.figure = None
         self._last_source_key = None
-        self._update_figure()
         self._draw()
+
+    def build_plotly_figure(self):
+
+        self._update_figure()
+        return self.figure
 
     def _configure_figure(self):
 
@@ -435,13 +441,52 @@ class SmartTradeChart:
 
         self.crosshair_x = event.x
         self.crosshair_y = event.y
-        self._draw()
+        self._schedule_crosshair_redraw()
 
     def _on_mouse_leave(self, _event):
 
         self.crosshair_x = None
         self.crosshair_y = None
+        self._cancel_crosshair_redraw()
+        self.canvas.delete(CROSSHAIR_CANVAS_TAG)
+
+    def _on_canvas_configure(self, _event):
+
+        if getattr(self, "_draw_after_id", None) is not None:
+            return
+        self._draw_after_id = self.canvas.after_idle(self._run_scheduled_draw)
+
+    def _run_scheduled_draw(self):
+
+        self._draw_after_id = None
         self._draw()
+
+    def _schedule_crosshair_redraw(self):
+
+        if getattr(self, "_crosshair_after_id", None) is not None:
+            return
+        self._crosshair_after_id = self.canvas.after_idle(
+            self._redraw_crosshair_overlay
+        )
+
+    def _cancel_crosshair_redraw(self):
+
+        after_id = getattr(self, "_crosshair_after_id", None)
+        self._crosshair_after_id = None
+        if after_id is None:
+            return
+        try:
+            self.canvas.after_cancel(after_id)
+        except (AttributeError, tk.TclError):
+            pass
+
+    def _redraw_crosshair_overlay(self):
+
+        self._crosshair_after_id = None
+        self.canvas.delete(CROSSHAIR_CANVAS_TAG)
+        context = getattr(self, "_crosshair_context", None)
+        if context is not None:
+            self._draw_crosshair(**context)
 
     def _on_mouse_wheel(self, event):
 
@@ -547,6 +592,15 @@ class SmartTradeChart:
 
     def _draw(self, _event=None):
 
+        draw_after_id = getattr(self, "_draw_after_id", None)
+        self._draw_after_id = None
+        if draw_after_id is not None:
+            try:
+                self.canvas.after_cancel(draw_after_id)
+            except (AttributeError, tk.TclError):
+                pass
+        self._cancel_crosshair_redraw()
+        self._crosshair_context = None
         self.canvas.delete("all")
 
         if self.candles.empty:
@@ -630,16 +684,17 @@ class SmartTradeChart:
             rsi_top,
             rsi_bottom
         )
-        self._draw_crosshair(
-            width,
-            price_top,
-            rsi_bottom,
-            padding,
-            high,
-            low,
-            price_top,
-            candle_area_height
-        )
+        self._crosshair_context = {
+            "width": width,
+            "top": price_top,
+            "bottom": rsi_bottom,
+            "padding": padding,
+            "high": high,
+            "low": low,
+            "price_top": price_top,
+            "price_height": candle_area_height,
+        }
+        self._draw_crosshair(**self._crosshair_context)
 
     def _visible_candle_window(self):
 
@@ -1051,7 +1106,8 @@ class SmartTradeChart:
             self.crosshair_x,
             bottom,
             fill="#666666",
-            dash=(4, 4)
+            dash=(4, 4),
+            tags=(CROSSHAIR_CANVAS_TAG,),
         )
         self.canvas.create_line(
             padding,
@@ -1059,7 +1115,8 @@ class SmartTradeChart:
             width - padding,
             self.crosshair_y,
             fill="#666666",
-            dash=(4, 4)
+            dash=(4, 4),
+            tags=(CROSSHAIR_CANVAS_TAG,),
         )
         self._draw_cursor_price_label(
             width,
@@ -1106,14 +1163,16 @@ class SmartTradeChart:
             x1,
             y1,
             fill=fill,
-            outline=BORDER_COLOR
+            outline=BORDER_COLOR,
+            tags=(CROSSHAIR_CANVAS_TAG,),
         )
         self.canvas.create_text(
             (x0 + x1) / 2,
             y,
             text=f"{price:.4f}",
             fill=text_fill,
-            font=("Arial", 9, "bold")
+            font=("Arial", 9, "bold"),
+            tags=(CROSSHAIR_CANVAS_TAG,),
         )
 
     def _price_to_y(self, price, high, low, padding, chart_height):
