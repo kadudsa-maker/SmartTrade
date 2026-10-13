@@ -1,5 +1,10 @@
+import logging
+
 from config import MAX_PIVOT_DISTANCE, PIVOT_RIGHT, RSI_PIVOT_MATCH_TOLERANCE
 from signal_quality import calculate_quality_score, calculate_signal_quality
+
+
+logger = logging.getLogger(__name__)
 
 
 def find_regular_divergences(
@@ -216,17 +221,21 @@ def _candle_times(df):
 
 def _log_divergence(df, divergence):
 
+    if not logger.isEnabledFor(logging.DEBUG):
+        return
+
     symbol = df.attrs.get("symbol", "UNKNOWN")
     name = divergence["type"].capitalize()
     quality = divergence["quality"]
     quality_score = calculate_quality_score(quality)
 
-    print("-------------------------------------")
-    print(symbol)
-    print(name)
-    print(f"Pivot: {quality['pivot']}")
-    print(f"RSI: {quality['rsi']}")
-    print(f"Distance: {quality['distance']}")
-    print(f"Volume: {quality['volume']}")
-    print(f"Quality: {quality_score}")
-    print("-------------------------------------")
+    logger.debug(
+        "Divergence symbol=%s type=%s pivot=%s rsi=%s distance=%s volume=%s quality=%s",
+        symbol,
+        name,
+        quality["pivot"],
+        quality["rsi"],
+        quality["distance"],
+        quality["volume"],
+        quality_score,
+    )

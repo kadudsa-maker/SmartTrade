@@ -3,12 +3,17 @@ import logging
 import os
 import shutil
 import sys
+import threading
 import traceback
+from datetime import datetime
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 
 APP_NAME = "SmartTrade"
 WINDOWS_APP_USER_MODEL_ID = "SmartTrade.SmartTrade"
+STARTUP_LOG_MAX_BYTES = 5 * 1024 * 1024
+STARTUP_LOG_BACKUP_COUNT = 3
 
 
 DEFAULT_ALERT_SETTINGS = {
@@ -180,22 +185,110 @@ def _ensure_default_json(folder, filename, default_data, copy_existing=False):
     )
 
 
-def configure_runtime_logging():
+def configure_runtime_logging(
+    log_path=None,
+    *,
+    max_bytes=STARTUP_LOG_MAX_BYTES,
+    backup_count=STARTUP_LOG_BACKUP_COUNT,
+    redirect_streams=None,
+):
 
-    log_path = runtime_path("logs", "startup.log")
+    log_path = Path(log_path) if log_path is not None else runtime_path("logs", "startup.log")
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path, preserved_path = _prepare_startup_log(log_path, max_bytes)
 
-    logging.basicConfig(
-        filename=log_path,
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+    handler = _SafeRotatingFileHandler(
+        log_path,
+        maxBytes=max_bytes,
+        backupCount=backup_count,
+        encoding="utf-8",
+        delay=True,
     )
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+    )
+    handler._smarttrade_runtime_handler = True
 
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+    root_logger.addHandler(handler)
+
+    handler._smarttrade_previous_excepthook = sys.excepthook
     sys.excepthook = _log_uncaught_exception
 
-    if is_frozen():
-        sys.stdout = _LogStream(logging.getLogger("stdout"), logging.INFO)
-        sys.stderr = _LogStream(logging.getLogger("stderr"), logging.ERROR)
+    if redirect_streams is None:
+        redirect_streams = is_frozen()
+    if redirect_streams:
+        stdout_stream = _LogStream(
+            logging.getLogger("stdout"), logging.INFO, original_stream=sys.stdout
+        )
+        stderr_stream = _LogStream(
+            logging.getLogger("stderr"), logging.ERROR, original_stream=sys.stderr
+        )
+        handler._smarttrade_redirected_streams = (stdout_stream, stderr_stream)
+        sys.stdout = stdout_stream
+        sys.stderr = stderr_stream
+
+    if preserved_path is not None:
+        logging.getLogger(__name__).info(
+            "Preserved oversized startup log as %s", preserved_path
+        )
+
+    return handler
+
+
+def close_runtime_logging(handler):
+
+    redirected_streams = getattr(handler, "_smarttrade_redirected_streams", ())
+    for stream in redirected_streams:
+        stream.flush()
+
+    if len(redirected_streams) == 2:
+        stdout_stream, stderr_stream = redirected_streams
+        if sys.stdout is stdout_stream:
+            sys.stdout = stdout_stream.original_stream
+        if sys.stderr is stderr_stream:
+            sys.stderr = stderr_stream.original_stream
+
+    if sys.excepthook is _log_uncaught_exception:
+        sys.excepthook = getattr(
+            handler, "_smarttrade_previous_excepthook", sys.__excepthook__
+        )
+
+    root_logger = logging.getLogger()
+    root_logger.removeHandler(handler)
+    handler.flush()
+    handler.close()
+
+
+def _prepare_startup_log(log_path, max_bytes):
+
+    try:
+        if not log_path.exists() or log_path.stat().st_size <= max_bytes:
+            return log_path, None
+
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        candidate = log_path.with_name(
+            f"{log_path.stem}.legacy-{timestamp}{log_path.suffix}"
+        )
+        counter = 1
+        while candidate.exists():
+            candidate = log_path.with_name(
+                f"{log_path.stem}.legacy-{timestamp}-{counter}{log_path.suffix}"
+            )
+            counter += 1
+
+        log_path.rename(candidate)
+        return log_path, candidate
+    except OSError as error:
+        fallback = log_path.with_name(
+            f"{log_path.stem}.{os.getpid()}{log_path.suffix}"
+        )
+        _write_logging_failure(
+            f"Could not preserve active startup log {log_path}; "
+            f"using {fallback}: {type(error).__name__}: {error}"
+        )
+        return fallback, None
 
 
 def _log_uncaught_exception(exc_type, exc_value, exc_traceback):
@@ -214,24 +307,67 @@ def log_startup_exception(error):
 
 class _LogStream:
 
-    def __init__(self, logger, level):
+    def __init__(self, logger, level, original_stream=None):
 
         self.logger = logger
         self.level = level
+        self.original_stream = original_stream
         self._buffer = ""
+        self._lock = threading.RLock()
 
     def write(self, message):
 
-        self._buffer += message
+        if not isinstance(message, str):
+            message = str(message)
 
-        while "\n" in self._buffer:
-            line, self._buffer = self._buffer.split("\n", 1)
-            if line.strip():
-                self.logger.log(self.level, line)
+        with self._lock:
+            self._buffer += message
+
+            while "\n" in self._buffer:
+                line, self._buffer = self._buffer.split("\n", 1)
+                if line.strip():
+                    self.logger.log(self.level, line)
+
+        return len(message)
 
     def flush(self):
 
-        if self._buffer.strip():
-            self.logger.log(self.level, self._buffer.strip())
+        with self._lock:
+            if self._buffer.strip():
+                self.logger.log(self.level, self._buffer.strip())
 
-        self._buffer = ""
+            self._buffer = ""
+
+    def isatty(self):
+
+        return False
+
+    @property
+    def encoding(self):
+
+        return getattr(self.original_stream, "encoding", "utf-8")
+
+
+class _SafeRotatingFileHandler(RotatingFileHandler):
+
+    def handleError(self, record):
+
+        _write_logging_failure(
+            f"Could not write SmartTrade log record from {record.name}",
+            include_exception=True,
+        )
+
+
+def _write_logging_failure(message, include_exception=False):
+
+    stream = getattr(sys, "__stderr__", None)
+    if stream is None:
+        return
+
+    try:
+        stream.write(f"SmartTrade logging error: {message}\n")
+        if include_exception:
+            traceback.print_exception(*sys.exc_info(), file=stream)
+        stream.flush()
+    except Exception:
+        pass

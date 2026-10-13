@@ -35,6 +35,7 @@ from config import (
     TOP_SORT_INTERVAL_MS
 )
 from divergence import find_regular_divergences
+from diagnostics import stability_diagnostics
 from fvg import Candle, FVGDirection, FVGOpportunityStatus, FVGService
 from fvg import diagnostics as fvg_diagnostics
 from fvg.filtering import normalize_fvg_status, record_has_qualifying_fvg
@@ -589,7 +590,12 @@ class SmartTradeUI:
             return
 
         fetch_started_at = time.perf_counter()
-        df = self.fetch_klines(self.selected_symbol, self.selected_interval)
+        with stability_diagnostics.operation(
+            "chart_fetch",
+            symbol=self.selected_symbol,
+            timeframe=self.selected_interval,
+        ):
+            df = self.fetch_klines(self.selected_symbol, self.selected_interval)
         self.perf_log(
             "chart_fetch",
             fetch_started_at,
@@ -612,7 +618,12 @@ class SmartTradeUI:
             self.selected_interval,
         )
         chart_started_at = time.perf_counter()
-        self.chart.set_candles(df, fvg_gaps=chart_fvg_gaps)
+        with stability_diagnostics.operation(
+            "chart_set_candles",
+            symbol=self.selected_symbol,
+            timeframe=self.selected_interval,
+        ):
+            self.chart.set_candles(df, fvg_gaps=chart_fvg_gaps)
         self.perf_log(
             "chart_set_candles",
             chart_started_at,
@@ -673,7 +684,12 @@ class SmartTradeUI:
         if chart is None or not hasattr(chart, "set_fvg_gaps"):
             return False
         fvg_result = result.get("fvg_result")
-        chart.set_fvg_gaps(() if fvg_result is None else fvg_result.gaps)
+        with stability_diagnostics.operation(
+            "chart_set_fvg_gaps",
+            symbol=symbol,
+            timeframe=self.selected_interval,
+        ):
+            chart.set_fvg_gaps(() if fvg_result is None else fvg_result.gaps)
         return True
 
     def initialize_scan_worker(self):
@@ -708,22 +724,32 @@ class SmartTradeUI:
                 continue
 
             try:
-                result = self.update_watchlist_coin(
-                    {"symbol": job["symbol"]},
-                    job["index"],
+                with stability_diagnostics.operation(
+                    "scan_job",
                     scan_id=job["scan_id"],
-                    interval=job["interval"],
-                    total_symbols=job["total_symbols"],
                     job_id=job["job_id"],
-                    scan_range=job["scan_range"],
-                    exchange_id=job["exchange_id"],
-                    display_symbol=job["display_symbol"],
-                    market_label=job["market_label"],
-                    platform_market_name=job["platform_market_name"],
-                    asset_class=job["asset_class"],
-                    analysis_mode=job["analysis_mode"],
-                )
+                    symbol=job["symbol"],
+                    interval=job["interval"],
+                ):
+                    result = self.update_watchlist_coin(
+                        {"symbol": job["symbol"]},
+                        job["index"],
+                        scan_id=job["scan_id"],
+                        interval=job["interval"],
+                        total_symbols=job["total_symbols"],
+                        job_id=job["job_id"],
+                        scan_range=job["scan_range"],
+                        exchange_id=job["exchange_id"],
+                        display_symbol=job["display_symbol"],
+                        market_label=job["market_label"],
+                        platform_market_name=job["platform_market_name"],
+                        asset_class=job["asset_class"],
+                        analysis_mode=job["analysis_mode"],
+                    )
             except Exception as error:
+                stability_diagnostics.record_exception(
+                    "scan_worker", error, symbol=job["symbol"], job_id=job["job_id"]
+                )
                 result = self.create_scan_result_record(
                     job["scan_id"],
                     job["symbol"],
@@ -840,6 +866,12 @@ class SmartTradeUI:
 
         if self.scan_cycle_started_at is None:
             self.scan_cycle_started_at = time.perf_counter()
+            stability_diagnostics.event(
+                "scan_cycle_started",
+                scan_id=self.current_scan_id,
+                symbols=len(self.current_scan_symbols),
+                mode=scan_mode_label(self.scan_mode, self.top_bybit_limit),
+            )
 
         symbol = self.current_scan_symbols[self.refresh_index]
         self.scan_symbol_with_progress(
@@ -889,6 +921,7 @@ class SmartTradeUI:
             return
 
         callback_started_at = time.perf_counter()
+        processed_count = 0
         try:
             while True:
                 try:
@@ -896,13 +929,22 @@ class SmartTradeUI:
                 except Empty:
                     break
                 self.apply_scan_result(result)
+                processed_count += 1
         finally:
             callback_ms = (time.perf_counter() - callback_started_at) * 1000
             self.max_scan_ui_callback_ms = max(self.max_scan_ui_callback_ms, callback_ms)
+            if processed_count or callback_ms >= 250:
+                stability_diagnostics.event(
+                    "scan_result_poll",
+                    duration_ms=round(callback_ms, 3),
+                    processed_count=processed_count,
+                    queue_size=self.scan_result_queue.qsize(),
+                )
             self.schedule_scan_result_poll()
 
     def apply_scan_result(self, result):
 
+        diagnostic_started_at = time.monotonic()
         if threading.get_ident() != self.ui_thread_id:
             raise RuntimeError("Scan results must be applied on the Tk main thread.")
 
@@ -1031,6 +1073,12 @@ class SmartTradeUI:
             callback_started_at,
             mode=scan_mode_label(self.scan_mode, self.top_bybit_limit),
             symbol=symbol
+        )
+        stability_diagnostics.record_duration(
+            "scan_result_ui",
+            diagnostic_started_at,
+            symbol=symbol,
+            scan_id=result.get("scan_id"),
         )
         delay_ms = 0 if continue_current_batch else SCAN_INTERVAL_MS
         self.schedule_scan_loop(delay_ms)
@@ -1238,6 +1286,7 @@ class SmartTradeUI:
 
     def show_watchlist_card(self, card, refresh=True):
 
+        changed = False
         if not self.card_widget_mapped(card):
             pack_options = {"fill": "x", "padx": 8, "pady": 5}
             try:
@@ -1250,16 +1299,21 @@ class SmartTradeUI:
                         pack_options["before"] = following["frame"]
                         break
             card["frame"].pack(**pack_options)
-        if refresh:
+            changed = True
+        if refresh and changed:
             self.refresh_card_positions()
+        return changed
 
     def hide_watchlist_card(self, card, refresh=True):
 
+        changed = False
         if self.card_widget_mapped(card):
             card["frame"].pack_forget()
+            changed = True
         self.configure_card_label_if_present(card, "position", text="")
-        if refresh:
+        if refresh and changed:
             self.refresh_card_positions()
+        return changed
 
     def current_card_scan_record(self, symbol):
 
@@ -1484,6 +1538,12 @@ class SmartTradeUI:
                 cycle=self.scan_cycle_number
             )
         self.scan_cycle_started_at = None
+        stability_diagnostics.event(
+            "scan_cycle_completed",
+            cycle=self.scan_cycle_number,
+            symbols=symbol_count,
+            mode=scan_mode_label(self.scan_mode, self.top_bybit_limit),
+        )
 
     def reset_scan_cycle_state(self):
 
@@ -1688,8 +1748,12 @@ class SmartTradeUI:
 
         try:
             fetch_started_at = time.perf_counter()
+            diagnostic_stage_started_at = time.monotonic()
             df = self.fetch_klines(symbol, interval, exchange_id=exchange_id)
             self.perf_log("fetch_klines", fetch_started_at, symbol=symbol)
+            stability_diagnostics.record_duration(
+                "fetch_klines", diagnostic_stage_started_at, symbol=symbol
+            )
             df.attrs["symbol"] = symbol
             df.attrs["timeframe"] = interval
             df.attrs["exchange_id"] = exchange_id or self.get_active_exchange_id()
@@ -1697,15 +1761,24 @@ class SmartTradeUI:
             rsi = None
             if capabilities.analyze_rsi:
                 rsi_started_at = time.perf_counter()
+                diagnostic_stage_started_at = time.monotonic()
                 rsi = calculate_rsi(df)
                 self.perf_log("calculate_rsi", rsi_started_at, symbol=symbol)
+                stability_diagnostics.record_duration(
+                    "calculate_rsi", diagnostic_stage_started_at, symbol=symbol
+                )
 
             candles_started_at = time.perf_counter()
+            diagnostic_stage_started_at = time.monotonic()
             candles = self.prepare_engine_candles(df, interval=interval)
             self.perf_log("prepare_candles", candles_started_at, symbol=symbol)
+            stability_diagnostics.record_duration(
+                "prepare_candles", diagnostic_stage_started_at, symbol=symbol
+            )
 
             fvg_result = None
             if capabilities.analyze_fvg:
+                diagnostic_stage_started_at = time.monotonic()
                 try:
                     fvg_closed, fvg_current, fvg_previous = self.prepare_fvg_candles(
                         candles,
@@ -1730,6 +1803,9 @@ class SmartTradeUI:
                         result=fvg_result,
                     )
                 except Exception as fvg_error:
+                    stability_diagnostics.record_exception(
+                        "analyze_fvg", fvg_error, symbol=symbol
+                    )
                     print(
                         "FVG analysis error: "
                         f"symbol={symbol} "
@@ -1737,6 +1813,10 @@ class SmartTradeUI:
                         f"timeframe={interval} "
                         f"error_type={type(fvg_error).__name__} "
                         f"error_message={fvg_error}"
+                    )
+                finally:
+                    stability_diagnostics.record_duration(
+                        "analyze_fvg", diagnostic_stage_started_at, symbol=symbol
                     )
 
             best_divergence = None
@@ -1748,15 +1828,23 @@ class SmartTradeUI:
                 or capabilities.analyze_market_structure
             ):
                 divergence_started_at = time.perf_counter()
+                diagnostic_stage_started_at = time.monotonic()
                 divergences = self.find_coin_divergences_from_candles(candles)
                 price_pivots = getattr(divergences, "price_pivots", [])
                 self.perf_log("find_divergences", divergence_started_at, symbol=symbol)
+                stability_diagnostics.record_duration(
+                    "find_divergences", diagnostic_stage_started_at, symbol=symbol
+                )
 
                 select_started_at = time.perf_counter()
+                diagnostic_stage_started_at = time.monotonic()
                 market_structure_divergence = self.select_freshest_best_signal(
                     divergences, len(candles)
                 )
                 self.perf_log("select_signal", select_started_at, symbol=symbol)
+                stability_diagnostics.record_duration(
+                    "select_signal", diagnostic_stage_started_at, symbol=symbol
+                )
                 if capabilities.analyze_divergence:
                     best_divergence = market_structure_divergence
                 if capabilities.analyze_market_structure:
@@ -1773,17 +1861,25 @@ class SmartTradeUI:
             candles_ago = None
             signal_status = ""
             ui_visible = False
+            diagnostic_stage_started_at = time.monotonic()
             if best_divergence is not None and capabilities.analyze_quality:
                 quality_score = calculate_quality_score(best_divergence.get("quality"))
                 candles_ago = self.signal_age(best_divergence, len(candles))
                 signal_status, _status_color = self.signal_status(best_divergence, len(candles))
                 ui_visible = self.is_visible_signal(best_divergence, len(candles))
+            stability_diagnostics.record_duration(
+                "calculate_quality", diagnostic_stage_started_at, symbol=symbol
+            )
 
+            diagnostic_stage_started_at = time.monotonic()
             market_structure_result = self.evaluate_passive_market_structure(
                 price_pivots,
                 market_structure_divergence,
                 rsi,
                 timeframe=interval,
+            )
+            stability_diagnostics.record_duration(
+                "market_structure", diagnostic_stage_started_at, symbol=symbol
             )
             trend_health_divergence = (
                 self.active_trend_health_divergence_direction(
@@ -1791,11 +1887,15 @@ class SmartTradeUI:
                     len(candles),
                 )
             )
+            diagnostic_stage_started_at = time.monotonic()
             trend_health_result = self.evaluate_passive_trend_health(
                 market_structure_result,
                 self.last_closed_candle_close(candles, interval),
                 trend_health_divergence,
                 rsi,
+            )
+            stability_diagnostics.record_duration(
+                "trend_health", diagnostic_stage_started_at, symbol=symbol
             )
 
             result_fields = {
@@ -1821,6 +1921,9 @@ class SmartTradeUI:
                 )
             result.update(result_fields)
         except Exception as error:
+            stability_diagnostics.record_exception(
+                "scan_symbol", error, symbol=symbol, scan_id=scan_id
+            )
             result["status"] = "error"
             result["error"] = f"{type(error).__name__}: {error}"
         finally:
@@ -3553,6 +3656,7 @@ class SmartTradeUI:
             return
 
         sort_started_at = time.perf_counter()
+        diagnostic_sort_started_at = time.monotonic()
         results = []
 
         for position, symbol in enumerate(self.top50_symbols):
@@ -3591,6 +3695,12 @@ class SmartTradeUI:
             sort_started_at,
             mode=scan_mode_label(self.scan_mode, self.top_bybit_limit),
             symbols=len(sorted_results)
+        )
+        stability_diagnostics.record_duration(
+            "sort_top_list",
+            diagnostic_sort_started_at,
+            mode=scan_mode_label(self.scan_mode, self.top_bybit_limit),
+            symbols=len(sorted_results),
         )
 
     def sort_top50_cards_if_needed(self):
@@ -3692,6 +3802,7 @@ class SmartTradeUI:
 
     def reorder_top50_cards(self, sorted_results):
 
+        reorder_started_at = time.monotonic()
         cards_by_symbol = {
             card["symbol_value"]: card
             for card in self.buttons
@@ -3700,37 +3811,46 @@ class SmartTradeUI:
         if any(result["symbol"] not in cards_by_symbol for result in sorted_results):
             return
 
-        for card in self.buttons:
-            card["frame"].pack_forget()
+        ordered_cards = [cards_by_symbol[result["symbol"]] for result in sorted_results]
+        current_visible_cards = [
+            card for card in self.buttons
+            if self.card_widget_mapped(card)
+        ]
+        ordered_visible_cards = [
+            card for card in ordered_cards
+            if self.card_widget_mapped(card)
+        ]
+        moved_cards = 0
 
-        self.buttons = []
-        self.cards_by_symbol = {}
+        for index, card in enumerate(ordered_visible_cards):
+            if current_visible_cards[index] is card:
+                continue
 
-        for index, result in enumerate(sorted_results):
-            symbol = result["symbol"]
-            card = cards_by_symbol[symbol]
+            before_card = current_visible_cards[index]
+            frame = card["frame"]
+            pack_configure = getattr(frame, "pack_configure", frame.pack)
+            pack_configure(before=before_card["frame"])
+            current_visible_cards.remove(card)
+            current_visible_cards.insert(index, card)
+            moved_cards += 1
 
-            card["frame"].pack(fill="x", padx=8, pady=5)
+        self.buttons = ordered_cards
+        self.cards_by_symbol = {
+            card["symbol_value"]: card
+            for card in ordered_cards
+        }
+
+        for index, card in enumerate(ordered_cards):
             card["index"] = index
-            self.buttons.append(card)
-            self.cards_by_symbol[symbol] = card
 
-            if symbol in self.top50_results:
-                self.update_watchlist_card(
-                    index,
-                    symbol,
-                    result["rsi"],
-                    result["divergence"],
-                    result["candle_count"],
-                    fvg_result=result.get("fvg_result"),
-                    fvg_status=result.get("fvg_status", ""),
-                    selected_fvg=result.get("selected_fvg"),
-                    market_structure=result.get("market_structure"),
-                    trend_health=result.get("trend_health"),
-                    quality=result.get("quality"),
-                )
-
-        self.apply_card_filters()
+        self.refresh_card_positions()
+        stability_diagnostics.record_duration(
+            "reorder_top_cards",
+            reorder_started_at,
+            cards=len(ordered_cards),
+            visible_cards=len(ordered_visible_cards),
+            moved_cards=moved_cards,
+        )
 
     def build_scan_mode_controls(self, parent):
 
@@ -4509,6 +4629,7 @@ class SmartTradeUI:
         self.begin_scan_generation()
         self.schedule_scan_result_poll()
         self.schedule_scan_loop(0)
+        stability_diagnostics.attach_gui(self.app, self.stability_state)
 
     def update_polish_time(self):
 
@@ -4572,6 +4693,34 @@ class SmartTradeUI:
 
         self.app.mainloop()
 
+    def stability_state(self):
+
+        result_queue = getattr(self, "scan_result_queue", None)
+        queue_size = 0
+        if result_queue is not None:
+            queue_mutex = getattr(result_queue, "mutex", None)
+            if queue_mutex is None or not queue_mutex.acquire(blocking=False):
+                queue_size = "locked"
+            else:
+                try:
+                    queue_size = result_queue._qsize()
+                finally:
+                    queue_mutex.release()
+        return {
+            "shutdown_requested": getattr(self, "shutdown_requested", False),
+            "scan_worker_busy": getattr(self, "scan_worker_busy", False),
+            "active_scan_job_id": getattr(self, "active_scan_job_id", None),
+            "current_scan_id": getattr(self, "current_scan_id", None),
+            "refresh_index": getattr(self, "refresh_index", None),
+            "scan_symbol_count": len(getattr(self, "current_scan_symbols", ())),
+            "result_queue_size": queue_size,
+            "worker_alive": bool(
+                getattr(self, "scan_worker_thread", None)
+                and self.scan_worker_thread.is_alive()
+            ),
+            "thread_count": threading.active_count(),
+        }
+
     def shutdown_app(self):
 
         if getattr(self, "shutdown_requested", False):
@@ -4585,6 +4734,7 @@ class SmartTradeUI:
         self.clear_scan_result_queue()
         self.scan_shutdown_event.set()
         self.scan_job_event.set()
+        stability_diagnostics.close()
 
         try:
             self.app.destroy()

@@ -20,6 +20,7 @@ class FakeFrame:
     def __init__(self, mapped=True):
         self.manager = "pack" if mapped else ""
         self.pack_calls = 0
+        self.pack_configure_calls = []
         self.pack_forget_calls = 0
         self.destroyed = False
         self.bindings = {}
@@ -33,6 +34,9 @@ class FakeFrame:
     def pack(self, **_options):
         self.manager = "pack"
         self.pack_calls += 1
+
+    def pack_configure(self, **options):
+        self.pack_configure_calls.append(options)
 
     def pack_forget(self):
         self.manager = ""
@@ -194,6 +198,21 @@ def test_hiding_card_removes_entire_main_frame_from_pack_layout():
     assert card["frame"].winfo_manager() == ""
 
 
+def test_unchanged_card_visibility_does_not_refresh_all_positions():
+    ui = make_ui(top_mode=False)
+    visible = make_card("VISIBLE", mapped=True)
+    hidden = make_card("HIDDEN", mapped=False)
+    refresh_calls = []
+    ui.refresh_card_positions = lambda: refresh_calls.append(True)
+
+    assert ui.show_watchlist_card(visible) is False
+    assert ui.hide_watchlist_card(hidden) is False
+
+    assert refresh_calls == []
+    assert visible["frame"].pack_calls == 0
+    assert hidden["frame"].pack_forget_calls == 0
+
+
 def test_numbering_has_no_gap_after_hidden_card():
     ui = make_ui(top_mode=False, symbols=["A", "B", "C"])
     first, hidden, third = make_card("A"), make_card("B"), make_card("C")
@@ -221,6 +240,55 @@ def test_top_sort_ignores_pending_and_removed_cards():
 
     assert ui.last_top50_order == ["GOOD"]
     assert [card["symbol_value"] for card in ui.buttons] == ["GOOD"]
+
+
+def test_top_reorder_moves_only_displaced_cards_without_unmapping_or_rerendering():
+    ui = make_ui(symbols=["A", "B", "C"])
+    cards = [make_card(symbol) for symbol in ("A", "B", "C")]
+    ui.buttons = cards
+    ui.cards_by_symbol = {card["symbol_value"]: card for card in cards}
+    ui.refresh_card_positions = lambda: None
+    ui.update_watchlist_card = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        AssertionError("sorting must not render card contents again")
+    )
+    ui.apply_card_filters = lambda: (_ for _ in ()).throw(
+        AssertionError("sorting must not reapply unchanged filters")
+    )
+    sorted_results = [{"symbol": symbol} for symbol in ("C", "A", "B")]
+
+    ui.reorder_top50_cards(sorted_results)
+
+    assert [card["symbol_value"] for card in ui.buttons] == ["C", "A", "B"]
+    assert [card["index"] for card in ui.buttons] == [0, 1, 2]
+    assert cards[2]["frame"].pack_configure_calls == [
+        {"before": cards[0]["frame"]}
+    ]
+    assert sum(card["frame"].pack_forget_calls for card in cards) == 0
+    assert sum(card["frame"].pack_calls for card in cards) == 0
+
+
+def test_top_reorder_keeps_filtered_cards_unmapped():
+    ui = make_ui(symbols=["A", "B", "C"])
+    first = make_card("A")
+    hidden = make_card("B", mapped=False)
+    third = make_card("C")
+    ui.buttons = [first, hidden, third]
+    ui.cards_by_symbol = {
+        card["symbol_value"]: card
+        for card in ui.buttons
+    }
+    ui.refresh_card_positions = lambda: None
+
+    ui.reorder_top50_cards([
+        {"symbol": "B"},
+        {"symbol": "C"},
+        {"symbol": "A"},
+    ])
+
+    assert [card["symbol_value"] for card in ui.buttons] == ["B", "C", "A"]
+    assert hidden["frame"].winfo_manager() == ""
+    assert hidden["frame"].pack_calls == 0
+    assert hidden["frame"].pack_configure_calls == []
 
 
 def test_top200_with_errors_contains_only_successful_result_cards():

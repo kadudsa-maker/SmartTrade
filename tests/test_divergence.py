@@ -1,4 +1,8 @@
+import logging
+
 import pandas as pd
+
+import divergence as divergence_module
 
 from config import (
     ACTIVE_MAX_CANDLES,
@@ -56,6 +60,77 @@ def test_find_regular_bullish_divergence():
     assert divergences[0]["start_index_delta"] == 0
     assert divergences[0]["end_index_delta"] == 0
     _assert_quality(divergences[0])
+
+
+def test_divergence_detection_is_silent_during_normal_scanning(capsys):
+
+    divergences = find_regular_divergences(
+        _df(),
+        pd.Series(range(100)),
+        [],
+        [_pivot(10, 100), _pivot(30, 90)],
+        [],
+        [_pivot(10, 30), _pivot(30, 40)]
+    )
+
+    captured = capsys.readouterr()
+    assert len(divergences) == 1
+    assert captured.out == ""
+    assert captured.err == ""
+
+
+def test_silent_logging_keeps_the_complete_divergence_result_unchanged():
+
+    divergences = find_regular_divergences(
+        _df(),
+        pd.Series(range(100)),
+        [],
+        [_pivot(10, 100), _pivot(30, 90)],
+        [],
+        [_pivot(10, 30), _pivot(30, 40)]
+    )
+
+    assert divergences == [{
+        "type": "bullish",
+        "price_start": _pivot(10, 100),
+        "price_end": _pivot(30, 90),
+        "rsi_start": _pivot(10, 30),
+        "rsi_end": _pivot(30, 40),
+        "start_index_delta": 0,
+        "end_index_delta": 0,
+        "pivot_index": 30,
+        "confirmed_index": 31,
+        "pivot_time": 30,
+        "confirmed_time": 30,
+        "age_candles": 68,
+        "quality": {
+            "pivot": 25.0,
+            "rsi": 50.0,
+            "distance": 100,
+            "volume": 50,
+        },
+        "strength": 0,
+    }]
+
+
+def test_optional_debug_logging_uses_one_record(caplog):
+
+    with caplog.at_level(logging.DEBUG, logger=divergence_module.__name__):
+        find_regular_divergences(
+            _df(),
+            pd.Series(range(100)),
+            [],
+            [_pivot(10, 100), _pivot(30, 90)],
+            [],
+            [_pivot(10, 30), _pivot(30, 40)]
+        )
+
+    records = [
+        record for record in caplog.records
+        if record.name == divergence_module.__name__
+    ]
+    assert len(records) == 1
+    assert "symbol=TESTUSDT" in records[0].getMessage()
 
 
 def test_find_regular_bearish_divergence():
