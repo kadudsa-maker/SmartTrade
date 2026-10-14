@@ -1479,14 +1479,15 @@ class SmartTradeUI:
 
         diagnostic_started_at = time.monotonic()
         pool = dict(getattr(self, "top_card_pool", {}))
-        for card in getattr(self, "buttons", []):
+        cards = list(getattr(self, "buttons", []))
+        self.forget_card_frames(cards)
+        for card in cards:
             symbol = card.get("symbol_value")
             if symbol is None:
                 continue
             previous = pool.get(symbol)
             if previous is not None and previous is not card:
                 previous["frame"].destroy()
-            self.hide_watchlist_card(card, refresh=False)
             pool[symbol] = card
 
         self.buttons = []
@@ -1498,6 +1499,33 @@ class SmartTradeUI:
             diagnostic_started_at,
             pooled_cards=len(pool),
         )
+
+    def forget_card_frames(self, cards):
+
+        frames = [
+            card.get("frame") for card in cards
+            if self.card_widget_mapped(card)
+        ]
+        frames = [frame for frame in frames if frame is not None]
+        if not frames:
+            return 0
+
+        first_frame = frames[0]
+        tk_app = getattr(first_frame, "tk", None)
+        if (
+            tk_app is not None
+            and all(getattr(frame, "tk", None) is tk_app for frame in frames)
+            and all(getattr(frame, "_w", None) for frame in frames)
+        ):
+            try:
+                tk_app.call("pack", "forget", *(frame._w for frame in frames))
+                return len(frames)
+            except TclError:
+                pass
+
+        for frame in frames:
+            frame.pack_forget()
+        return len(frames)
 
     def card_widget_mapped(self, card):
 
@@ -2555,9 +2583,6 @@ class SmartTradeUI:
         self.last_card_texts = {}
         self.clear_chart_fvg()
 
-        for card in getattr(self, "buttons", []):
-            self.update_market_structure_card_section(card)
-
         if getattr(self, "watchlist_scroll", None) is not None:
             if self.is_top_bybit_mode():
                 self.stash_top_result_cards()
@@ -2565,6 +2590,8 @@ class SmartTradeUI:
                 self.clear_watchlist_cards()
                 self.build_watchlist_cards()
         else:
+            for card in getattr(self, "buttons", []):
+                self.update_market_structure_card_section(card)
             self.apply_card_filters()
 
     def update_rsi_sort_mode_label(self):

@@ -335,6 +335,40 @@ def test_top_rescan_stashes_cards_without_destroying_widgets():
     assert all(card["frame"].winfo_manager() == "" for card in cards)
 
 
+def test_top_rescan_forgets_real_tk_frames_in_one_batch():
+    ui = make_ui(symbols=["A", "B", "C"])
+
+    class FakeTk:
+        def __init__(self):
+            self.calls = []
+
+        def call(self, *args):
+            self.calls.append(args)
+
+    class TkFrame(FakeFrame):
+        def __init__(self, tk, name):
+            super().__init__()
+            self.tk = tk
+            self._w = name
+
+        def pack_forget(self):
+            raise AssertionError("batch-capable frames must use one Tcl call")
+
+    tk_app = FakeTk()
+    cards = [make_card(symbol) for symbol in ("A", "B", "C")]
+    for index, card in enumerate(cards):
+        card["frame"] = TkFrame(tk_app, f".card{index}")
+    ui.buttons = cards
+    ui.cards_by_symbol = {card["symbol_value"]: card for card in cards}
+
+    ui.stash_top_result_cards()
+
+    assert tk_app.calls == [
+        ("pack", "forget", ".card0", ".card1", ".card2")
+    ]
+    assert ui.top_card_pool == {"A": cards[0], "B": cards[1], "C": cards[2]}
+
+
 def test_first_new_result_reuses_stashed_top_card():
     ui = make_ui(symbols=["BTCUSDT"])
     card = make_card("BTCUSDT", mapped=False)
