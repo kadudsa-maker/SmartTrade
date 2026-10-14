@@ -376,3 +376,54 @@ def test_resize_events_are_coalesced_to_one_full_redraw():
     assert len(chart.canvas.idle_callbacks) == 1
     chart.canvas.run_idle_callbacks()
     assert redraws == [True]
+
+
+def test_real_tk_canvas_motion_reuses_one_crosshair_layer_and_closes_safely():
+    try:
+        root = chart_module.ctk.CTk()
+    except chart_module.tk.TclError:
+        pytest.skip("Tk display is unavailable")
+
+    destroyed = False
+    try:
+        root.geometry("1000x600+20+20")
+        chart = SmartTradeChart(root)
+        chart.pack(fill="both", expand=True)
+        root.update()
+        chart.set_candles(frame(300))
+        root.update_idletasks()
+
+        original_draw = chart._draw
+        full_redraws = []
+
+        def counted_draw(*args, **kwargs):
+            full_redraws.append(True)
+            return original_draw(*args, **kwargs)
+
+        chart._draw = counted_draw
+        for index in range(1000):
+            chart.canvas.event_generate(
+                "<Motion>",
+                x=100 + index % 700,
+                y=100 + index % 350,
+            )
+        root.update_idletasks()
+
+        assert full_redraws == []
+        assert len(chart.canvas.find_withtag(CROSSHAIR_CANVAS_TAG)) == 4
+
+        for index in range(100):
+            chart.canvas.event_generate(
+                "<Motion>",
+                x=150 + index,
+                y=250,
+            )
+        root.update_idletasks()
+        assert len(chart.canvas.find_withtag(CROSSHAIR_CANVAS_TAG)) == 4
+
+        chart._on_mouse_move(SimpleNamespace(x=300, y=300))
+        root.destroy()
+        destroyed = True
+    finally:
+        if not destroyed:
+            root.destroy()
