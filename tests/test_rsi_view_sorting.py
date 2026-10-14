@@ -317,6 +317,7 @@ def test_scan_restart_resets_scan_state_without_changing_user_modes():
     alert_manager = FakeAlertManager()
     started = []
     rebuilt = []
+    stashed = []
 
     ui.app = FakeApp()
     ui.shutdown_requested = False
@@ -349,6 +350,7 @@ def test_scan_restart_resets_scan_state_without_changing_user_modes():
     ui.coins = [{"symbol": "OLDUSDT"}]
     ui.scan_status_label = FakeLabel()
     ui.build_watchlist_cards = lambda: rebuilt.append(True)
+    ui.stash_top_result_cards = lambda: stashed.append(True)
     ui.scan_one_coin = lambda: started.append(True)
     ui.prepare_scan_queue_for_restart = lambda: (
         setattr(ui, "coins", [{"symbol": "BTCUSDT"}, {"symbol": "ETHUSDT"}])
@@ -375,7 +377,8 @@ def test_scan_restart_resets_scan_state_without_changing_user_modes():
     assert ui.last_full_scan_time is None
     assert ui.last_card_texts == {}
     assert ui.coins == [{"symbol": "BTCUSDT"}, {"symbol": "ETHUSDT"}]
-    assert rebuilt == [True]
+    assert rebuilt == []
+    assert stashed == [True]
     assert started == [True]
     assert ui.selected_interval == "60"
     assert ui.rsi_sort_mode == RSI_SORT_MODE_RSI

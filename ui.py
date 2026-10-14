@@ -249,6 +249,7 @@ class SmartTradeUI:
         self.coins = [{"symbol": coin} for coin in self.watchlist_symbols]
         self.buttons = []
         self.cards_by_symbol = {}
+        self.top_card_pool = {}
         self.last_card_texts = {}
         self.timeframe_buttons = {}
         self.scan_mode_buttons = {}
@@ -544,6 +545,8 @@ class SmartTradeUI:
 
     def select_timeframe(self, interval):
 
+        diagnostic_started_at = time.monotonic()
+        previous_interval = getattr(self, "selected_interval", None)
         self.cancel_scan_loop()
         self.clear_fvg_card_sections()
         self.clear_chart_fvg()
@@ -554,12 +557,20 @@ class SmartTradeUI:
         self.reset_scan_cycle_state()
         if self.is_top_bybit_mode():
             self.coins = [{"symbol": symbol} for symbol in self.top50_symbols]
-            self.build_watchlist_cards()
+            self.stash_top_result_cards()
 
         self.update_timeframe_buttons()
         self.refresh_selected()
         self.begin_scan_generation()
         self.schedule_scan_loop(0)
+        stability_diagnostics.record_duration(
+            "timeframe_change_ui",
+            diagnostic_started_at,
+            previous_interval=previous_interval,
+            interval=interval,
+            cards=len(getattr(self, "buttons", ())),
+            pooled_cards=len(getattr(self, "top_card_pool", {})),
+        )
 
     def update_timeframe_buttons(self):
 
@@ -1144,8 +1155,11 @@ class SmartTradeUI:
         self.cancel_scan_loop()
         self.reset_scan_state_for_new_run()
         self.begin_scan_generation()
-        self.clear_watchlist_cards()
-        self.build_watchlist_cards()
+        if self.is_top_bybit_mode():
+            self.stash_top_result_cards()
+        else:
+            self.clear_watchlist_cards()
+            self.build_watchlist_cards()
         self.update_scan_status(SCAN_START, GREEN)
         self.update_scan_progress(None, 0, len(self.get_scan_symbols()))
         self.schedule_scan_loop(0)
@@ -1263,12 +1277,45 @@ class SmartTradeUI:
 
     def clear_watchlist_cards(self):
 
-        for card in getattr(self, "buttons", []):
-            card["frame"].destroy()
+        cards = list(getattr(self, "buttons", []))
+        cards.extend(getattr(self, "top_card_pool", {}).values())
+        destroyed_frames = set()
+        for card in cards:
+            frame = card["frame"]
+            frame_id = id(frame)
+            if frame_id in destroyed_frames:
+                continue
+            frame.destroy()
+            destroyed_frames.add(frame_id)
 
         self.buttons = []
         self.cards_by_symbol = {}
+        self.top_card_pool = {}
         self.last_card_texts = {}
+
+    def stash_top_result_cards(self):
+
+        diagnostic_started_at = time.monotonic()
+        pool = dict(getattr(self, "top_card_pool", {}))
+        for card in getattr(self, "buttons", []):
+            symbol = card.get("symbol_value")
+            if symbol is None:
+                continue
+            previous = pool.get(symbol)
+            if previous is not None and previous is not card:
+                previous["frame"].destroy()
+            self.hide_watchlist_card(card, refresh=False)
+            pool[symbol] = card
+
+        self.buttons = []
+        self.cards_by_symbol = {}
+        self.top_card_pool = pool
+        self.last_card_texts = {}
+        stability_diagnostics.record_duration(
+            "stash_top_result_cards",
+            diagnostic_started_at,
+            pooled_cards=len(pool),
+        )
 
     def card_widget_mapped(self, card):
 
@@ -2330,8 +2377,11 @@ class SmartTradeUI:
             self.update_market_structure_card_section(card)
 
         if getattr(self, "watchlist_scroll", None) is not None:
-            self.clear_watchlist_cards()
-            self.build_watchlist_cards()
+            if self.is_top_bybit_mode():
+                self.stash_top_result_cards()
+            else:
+                self.clear_watchlist_cards()
+                self.build_watchlist_cards()
         else:
             self.apply_card_filters()
 
@@ -3574,12 +3624,7 @@ class SmartTradeUI:
         if self.watchlist_scroll is None:
             return
 
-        for card in self.buttons:
-            card["frame"].destroy()
-
-        self.buttons = []
-        self.last_card_texts = {}
-        self.cards_by_symbol = {}
+        self.clear_watchlist_cards()
 
         editable = self.scan_mode == SCAN_MODE_WATCHLIST
 
@@ -3716,13 +3761,14 @@ class SmartTradeUI:
         card_created = card is None
 
         if card_created:
-            card = self.create_watchlist_card(
-                self.watchlist_scroll,
-                symbol,
-                len(self.buttons),
-                editable=False
-            )
-            card["frame"].pack(fill="x", padx=8, pady=5)
+            card = getattr(self, "top_card_pool", {}).pop(symbol, None)
+            if card is None:
+                card = self.create_watchlist_card(
+                    self.watchlist_scroll,
+                    symbol,
+                    len(self.buttons),
+                    editable=False
+                )
             card["index"] = len(self.buttons)
             self.buttons.append(card)
             self.cards_by_symbol[symbol] = card
@@ -4713,6 +4759,8 @@ class SmartTradeUI:
             "current_scan_id": getattr(self, "current_scan_id", None),
             "refresh_index": getattr(self, "refresh_index", None),
             "scan_symbol_count": len(getattr(self, "current_scan_symbols", ())),
+            "active_card_count": len(getattr(self, "buttons", ())),
+            "pooled_card_count": len(getattr(self, "top_card_pool", {})),
             "result_queue_size": queue_size,
             "worker_alive": bool(
                 getattr(self, "scan_worker_thread", None)

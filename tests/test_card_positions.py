@@ -142,6 +142,7 @@ def test_scan_rebuild_starts_positions_at_one():
     ui.cancel_scan_loop = lambda: None
     ui.reset_scan_state_for_new_run = lambda: None
     ui.begin_scan_generation = lambda: None
+    ui.is_top_bybit_mode = lambda: False
     ui.clear_watchlist_cards = lambda: setattr(ui, "buttons", [])
     ui.build_watchlist_cards = lambda: (
         setattr(ui, "buttons", rebuilt_cards) or ui.refresh_card_positions()

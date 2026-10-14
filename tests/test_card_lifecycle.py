@@ -93,6 +93,7 @@ def make_ui(*, top_mode=True, symbols=None):
     ui.top50_results = {}
     ui.buttons = []
     ui.cards_by_symbol = {}
+    ui.top_card_pool = {}
     ui.last_card_texts = {}
     ui.watchlist_scroll = object()
     ui.is_top_bybit_mode = lambda: top_mode
@@ -315,6 +316,84 @@ def test_scan_restart_rebuild_has_no_old_or_pending_top_cards():
     assert old["frame"].destroyed is True
     assert ui.buttons == []
     assert ui.cards_by_symbol == {}
+
+
+def test_top_rescan_stashes_cards_without_destroying_widgets():
+    ui = make_ui(symbols=["A", "B"])
+    cards = [make_card("A"), make_card("B")]
+    ui.buttons = cards
+    ui.cards_by_symbol = {card["symbol_value"]: card for card in cards}
+    ui.last_card_texts = {"A": {"status": "old"}}
+
+    ui.stash_top_result_cards()
+
+    assert ui.buttons == []
+    assert ui.cards_by_symbol == {}
+    assert ui.top_card_pool == {"A": cards[0], "B": cards[1]}
+    assert ui.last_card_texts == {}
+    assert all(card["frame"].destroyed is False for card in cards)
+    assert all(card["frame"].winfo_manager() == "" for card in cards)
+
+
+def test_first_new_result_reuses_stashed_top_card():
+    ui = make_ui(symbols=["BTCUSDT"])
+    card = make_card("BTCUSDT", mapped=False)
+    ui.top_card_pool = {"BTCUSDT": card}
+    ui.create_watchlist_card = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        AssertionError("a pooled card must be reused")
+    )
+
+    ui.apply_scan_result(result(ui, "BTCUSDT", 0, "no_signal"))
+
+    assert ui.cards_by_symbol["BTCUSDT"] is card
+    assert ui.buttons == [card]
+    assert ui.top_card_pool == {}
+    assert card["frame"].destroyed is False
+    assert card["frame"].winfo_manager() == "pack"
+
+
+def test_clear_watchlist_cards_destroys_active_and_pooled_cards_once():
+    ui = make_ui(symbols=["ACTIVE", "POOLED"])
+    active = make_card("ACTIVE")
+    pooled = make_card("POOLED", mapped=False)
+    ui.buttons = [active]
+    ui.cards_by_symbol = {"ACTIVE": active}
+    ui.top_card_pool = {"POOLED": pooled}
+
+    ui.clear_watchlist_cards()
+
+    assert active["frame"].destroyed is True
+    assert pooled["frame"].destroyed is True
+    assert ui.buttons == []
+    assert ui.cards_by_symbol == {}
+    assert ui.top_card_pool == {}
+
+
+def test_timeframe_change_stashes_top_cards_instead_of_rebuilding_them():
+    ui = make_ui(symbols=["A", "B"])
+    cards = [make_card("A"), make_card("B")]
+    ui.buttons = cards
+    ui.cards_by_symbol = {card["symbol_value"]: card for card in cards}
+    ui.selected_interval = "60"
+    ui.cancel_scan_loop = lambda: None
+    ui.clear_fvg_card_sections = lambda: None
+    ui.clear_chart_fvg = lambda: None
+    ui.reset_scan_cycle_state = lambda: None
+    ui.update_timeframe_buttons = lambda: None
+    ui.refresh_selected = lambda: None
+    ui.begin_scan_generation = lambda: None
+    ui.schedule_scan_loop = lambda *_args: None
+    ui.build_watchlist_cards = lambda: (_ for _ in ()).throw(
+        AssertionError("timeframe change must not rebuild top cards")
+    )
+
+    ui.select_timeframe("15")
+
+    assert ui.selected_interval == "15"
+    assert ui.buttons == []
+    assert ui.cards_by_symbol == {}
+    assert ui.top_card_pool == {"A": cards[0], "B": cards[1]}
+    assert all(card["frame"].destroyed is False for card in cards)
 
 
 def test_exchange_change_clears_previous_provider_cards_before_results():
