@@ -1,6 +1,6 @@
 import time
 
-from config import ALL_BYBIT_SYMBOLS_CACHE_TTL, KLINE_CACHE_TTL, OKX_BASE_URL, TOP_BYBIT_CACHE_TTL
+from config import ALL_BYBIT_SYMBOLS_CACHE_TTL, OKX_BASE_URL, TOP_BYBIT_CACHE_TTL
 from exchange_providers.base import ExchangeProviderError, ExchangeSymbol
 from exchange_providers.okx import OKXPerpetualProvider
 
@@ -80,9 +80,9 @@ class OKXSpotProvider(OKXPerpetualProvider):
         instrument = self.resolve_symbol(symbol)
         mapped_interval = self.map_interval(interval)
         key = self.cache_key(instrument, interval, limit)
-        cached = self._candle_cache.get(key)
-        if cached and time.time() - cached["time"] < KLINE_CACHE_TTL:
-            return cached["data"]
+        cached = self.get_cached_candles(key)
+        if cached is not None:
+            return cached
         data = self._get("/api/v5/market/candles", {
             "instId": instrument.exchange_symbol,
             "bar": mapped_interval,
@@ -96,7 +96,7 @@ class OKXSpotProvider(OKXPerpetualProvider):
             exchange_symbol=instrument.exchange_symbol,
             display_symbol=instrument.display_symbol,
         )
-        self._candle_cache[key] = {"time": time.time(), "data": frame}
+        self.store_cached_candles(key, frame)
         return frame
 
     @staticmethod

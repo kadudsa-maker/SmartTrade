@@ -1,3 +1,5 @@
+import threading
+
 import pandas as pd
 import plotly.graph_objects as go
 
@@ -87,6 +89,14 @@ class FakeChart:
 def prepare_refresh_ui(ui):
     ui.chart = FakeChart()
     ui.fetch_calls = 0
+    ui.ui_thread_id = threading.get_ident()
+    ui.shutdown_requested = False
+    ui.chart_job_sequence = 0
+    ui.chart_job_lock = threading.Lock()
+    ui.chart_job_event = threading.Event()
+    ui.pending_chart_job = None
+    ui.active_chart_job_id = None
+    ui.chart_worker_busy = False
 
     def fetch(*_args, **_kwargs):
         ui.fetch_calls += 1
@@ -99,6 +109,14 @@ def prepare_refresh_ui(ui):
     ui.asset_class = lambda _symbol: "crypto"
     ui.update_open_chart_status = lambda *_args: None
     return ui
+
+
+def complete_refresh(ui):
+    assert ui.refresh_selected() is True
+    job = ui.pending_chart_job
+    frame = ui.fetch_klines(job["symbol"], job["timeframe"], job["exchange_id"])
+    result = {**job, "frame": frame, "error": None}
+    assert ui.apply_chart_result(result) is True
 
 
 def test_matching_scan_record_supplies_all_gaps_without_reanalysis(monkeypatch):
@@ -239,7 +257,7 @@ def test_fvg_analysis_error_returns_empty_gaps_and_chart_can_render(monkeypatch)
     monkeypatch.setattr(ui_module, "FVGService", lambda: type(
         "Service", (), {"analyze": lambda self, *_args: (_ for _ in ()).throw(RuntimeError("bad FVG"))}
     )())
-    ui.refresh_selected()
+    complete_refresh(ui)
     assert len(ui.chart.calls) == 1
     assert ui.chart.calls[0][1] == ()
 
@@ -251,7 +269,7 @@ def test_chart_refresh_uses_one_ohlc_request_with_matching_record(monkeypatch):
     monkeypatch.setattr(ui_module, "FVGService", lambda: (_ for _ in ()).throw(
         AssertionError("matching record must be used")
     ))
-    ui.refresh_selected()
+    complete_refresh(ui)
     assert ui.fetch_calls == 1
     assert ui.chart.calls[0][1] == (gap,)
 
@@ -263,7 +281,7 @@ def test_chart_refresh_uses_one_ohlc_request_with_fallback(monkeypatch):
     monkeypatch.setattr(ui_module, "FVGService", lambda: type(
         "Service", (), {"analyze": lambda self, *_args: fvg_result([])}
     )())
-    ui.refresh_selected()
+    complete_refresh(ui)
     assert ui.fetch_calls == 1
 
 

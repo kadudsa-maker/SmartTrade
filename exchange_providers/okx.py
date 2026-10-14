@@ -5,7 +5,6 @@ import requests
 
 from config import (
     ALL_BYBIT_SYMBOLS_CACHE_TTL,
-    KLINE_CACHE_TTL,
     OKX_EEA_BASE_URL,
     TOP_BYBIT_CACHE_TTL,
 )
@@ -146,9 +145,9 @@ class OKXPerpetualProvider(ExchangeProvider):
         instrument = self.resolve_symbol(symbol)
         mapped_interval = self.map_interval(interval)
         key = self.cache_key(instrument, interval, limit)
-        cached = self._candle_cache.get(key)
-        if cached and time.time() - cached["time"] < KLINE_CACHE_TTL:
-            return cached["data"]
+        cached = self.get_cached_candles(key)
+        if cached is not None:
+            return cached
         data = self._get("/api/v5/market/candles", {
             "instId": instrument.exchange_symbol,
             "bar": mapped_interval,
@@ -164,7 +163,7 @@ class OKXPerpetualProvider(ExchangeProvider):
             platform_market_name=instrument.platform_market_name,
             asset_class=instrument.asset_class,
         )
-        self._candle_cache[key] = {"time": time.time(), "data": frame}
+        self.store_cached_candles(key, frame)
         return frame
 
     @staticmethod

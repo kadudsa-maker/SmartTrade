@@ -1,10 +1,12 @@
 import json
 import time
+from collections import OrderedDict
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 
 from app_paths import runtime_path
+from config import ALERT_RECORD_MAX_ENTRIES
 from signal_quality import calculate_quality_score
 
 
@@ -217,7 +219,8 @@ class AlertManager:
         notifier=None,
         log_writer=None,
         default_timeframe="15",
-        default_scan_range="watchlist"
+        default_scan_range="watchlist",
+        max_records=ALERT_RECORD_MAX_ENTRIES,
     ):
 
         self.settings_path = Path(settings_path)
@@ -225,7 +228,8 @@ class AlertManager:
         self.log_writer = log_writer or AlertLogWriter()
         self.has_saved_settings = self.settings_path.exists()
         self.settings = self.load_settings(default_timeframe, default_scan_range)
-        self.alert_records = {}
+        self.max_records = max(1, int(max_records))
+        self.alert_records = OrderedDict()
 
     def load_settings(self, default_timeframe="15", default_scan_range="watchlist"):
 
@@ -290,6 +294,8 @@ class AlertManager:
         record = self.alert_records.get(signal_id)
 
         if record is None:
+            while len(self.alert_records) >= self.max_records:
+                self.alert_records.popitem(last=False)
             record = {
                 "sent_count": 0,
                 "opened": False,
@@ -297,6 +303,8 @@ class AlertManager:
                 "event": None
             }
             self.alert_records[signal_id] = record
+        else:
+            self.alert_records.move_to_end(signal_id)
 
         event = self.build_event(
             symbol,

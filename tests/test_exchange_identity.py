@@ -298,6 +298,33 @@ def test_worker_context_switches_independently_to_each_okx_provider(
     assert result["exchange_id"] == exchange_id
 
 
+def test_exchange_loader_returns_through_queue_without_calling_tk_from_worker():
+    ui = build_switch_ui()
+    ui.shutdown_requested = False
+    ui.initialize_exchange_loader()
+    provider = FakeProvider()
+    applied_on = []
+    ui.app = type("StrictTk", (), {
+        "after": lambda *_args: (_ for _ in ()).throw(
+            AssertionError("worker must not call Tk")
+        )
+    })()
+    ui.apply_exchange_switch = lambda *_args: applied_on.append(threading.get_ident())
+    ui.finish_exchange_switch_error = lambda *_args: pytest.fail("unexpected error")
+    ui.schedule_exchange_result_poll = lambda: None
+
+    worker = threading.Thread(
+        target=ui.prepare_exchange_switch, args=("okx", provider)
+    )
+    worker.start()
+    worker.join()
+
+    assert ui.exchange_result_queue.qsize() == 1
+    ui.process_exchange_results()
+    assert applied_on == [threading.get_ident()]
+    assert ui.exchange_result_queue.empty()
+
+
 def test_chart_fetch_uses_active_card_provider(monkeypatch):
     ui = SmartTradeUI.__new__(SmartTradeUI)
     ui.active_exchange_id = "okx_spot"

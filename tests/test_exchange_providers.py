@@ -160,6 +160,22 @@ def test_provider_contract_instruments_intervals_and_candles(provider):
     assert provider.cache_key(instruments[0], "60", 300).startswith(provider.exchange_id + "|")
 
 
+def test_candle_cache_is_lru_bounded_and_expired_entries_are_removed():
+    provider = BybitProvider(session=FakeBybitSession())
+    provider.candle_cache_max_entries = 3
+    frames = [pd.DataFrame({"close": [value]}) for value in range(5)]
+
+    for index, frame in enumerate(frames):
+        provider.store_cached_candles(f"key-{index}", frame, now=100 + index)
+
+    assert provider.candle_cache_size() == 3
+    assert list(provider._candle_cache) == ["key-2", "key-3", "key-4"]
+    assert provider.get_cached_candles("key-2", now=105) is frames[2]
+    assert list(provider._candle_cache)[-1] == "key-2"
+    assert provider.get_cached_candles("key-3", now=200) is None
+    assert provider.candle_cache_size() == 2
+
+
 def test_provider_ids_are_unique_and_top_rankings_return_records():
     bybit = BybitProvider(session=FakeBybitSession())
     okx = OKXProvider(session=FakeOKXSession())

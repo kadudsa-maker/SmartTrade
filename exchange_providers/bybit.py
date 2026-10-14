@@ -2,7 +2,7 @@ import time
 
 from pybit.unified_trading import HTTP
 
-from config import ALL_BYBIT_SYMBOLS_CACHE_TTL, KLINE_CACHE_TTL, TOP_BYBIT_CACHE_TTL
+from config import ALL_BYBIT_SYMBOLS_CACHE_TTL, TOP_BYBIT_CACHE_TTL
 from exchange_providers.base import ExchangeProvider, ExchangeProviderError, ExchangeSymbol
 
 
@@ -98,9 +98,9 @@ class BybitProvider(ExchangeProvider):
         )
         mapped_interval = self.map_interval(interval)
         key = self.cache_key(instrument, interval, limit)
-        cached = self._candle_cache.get(key)
-        if cached and time.time() - cached["time"] < KLINE_CACHE_TTL:
-            return cached["data"]
+        cached = self.get_cached_candles(key)
+        if cached is not None:
+            return cached
         try:
             candles = self.session.get_kline(
                 category="linear", symbol=instrument.exchange_symbol,
@@ -115,5 +115,5 @@ class BybitProvider(ExchangeProvider):
             ) from error
         frame.attrs.update(exchange_id=self.exchange_id, exchange_symbol=instrument.exchange_symbol,
                            display_symbol=instrument.display_symbol)
-        self._candle_cache[key] = {"time": time.time(), "data": frame}
+        self.store_cached_candles(key, frame)
         return frame

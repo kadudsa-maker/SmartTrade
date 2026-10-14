@@ -297,6 +297,8 @@ class SmartTradeUI:
         self.ui_thread_id = threading.get_ident()
         self.max_scan_ui_callback_ms = 0
         self.initialize_scan_worker()
+        self.initialize_chart_worker()
+        self.initialize_exchange_loader()
         self.app.protocol("WM_DELETE_WINDOW", self.shutdown_app)
         self.alert_manager = AlertManager(
             default_timeframe=self.selected_interval,
@@ -341,29 +343,84 @@ class SmartTradeUI:
         if self.exchange_menu is not None:
             self.exchange_menu.configure(state="disabled")
         self.update_scan_status(f"Loading {target_provider.display_name}...", MUTED_TEXT_COLOR)
-        threading.Thread(
+        worker = getattr(self, "exchange_worker_thread", None)
+        if worker is not None and worker.is_alive():
+            return False
+        self.exchange_worker_thread = threading.Thread(
             target=self.prepare_exchange_switch,
             args=(target_exchange_id, target_provider),
             name="SmartTradeExchangeLoader",
             daemon=True
-        ).start()
+        )
+        self.exchange_worker_thread.start()
         return True
+
+    def initialize_exchange_loader(self):
+
+        self.exchange_result_queue = Queue()
+        self.exchange_result_after_id = None
+        self.exchange_worker_thread = None
 
     def prepare_exchange_switch(self, target_exchange_id, target_provider):
 
         try:
             prepared = self.load_exchange_symbols(target_exchange_id, target_provider)
         except Exception as error:
-            self.app.after(
-                0, lambda: self.finish_exchange_switch_error(target_provider, error)
-            )
+            result = (target_exchange_id, target_provider, None, error)
+        else:
+            result = (target_exchange_id, target_provider, prepared, None)
+        self.exchange_result_queue.put(result)
+
+    def process_exchange_results(self):
+
+        self.exchange_result_after_id = None
+        try:
+            while True:
+                try:
+                    target_exchange_id, target_provider, prepared, error = (
+                        self.exchange_result_queue.get_nowait()
+                    )
+                except Empty:
+                    break
+                if self.shutdown_requested:
+                    continue
+                if error is not None:
+                    self.finish_exchange_switch_error(target_provider, error)
+                else:
+                    self.apply_exchange_switch(
+                        target_exchange_id, target_provider, *prepared
+                    )
+        finally:
+            self.schedule_exchange_result_poll()
+
+    def schedule_exchange_result_poll(self):
+
+        if self.shutdown_requested or self.exchange_result_after_id is not None:
             return
-        self.app.after(
-            0,
-            lambda: self.apply_exchange_switch(
-                target_exchange_id, target_provider, *prepared
-            )
+        self.exchange_result_after_id = self.app.after(
+            SCAN_RESULT_POLL_MS, self.process_exchange_results
         )
+
+    def cancel_exchange_result_poll(self):
+
+        if getattr(self, "exchange_result_after_id", None) is None:
+            return
+        try:
+            self.app.after_cancel(self.exchange_result_after_id)
+        except Exception:
+            pass
+        self.exchange_result_after_id = None
+
+    def clear_exchange_result_queue(self):
+
+        result_queue = getattr(self, "exchange_result_queue", None)
+        if result_queue is None:
+            return
+        while True:
+            try:
+                result_queue.get_nowait()
+            except Empty:
+                return
 
     def load_exchange_symbols(self, target_exchange_id, target_provider):
 
@@ -598,50 +655,175 @@ class SmartTradeUI:
     def refresh_selected(self):
 
         if self.selected_symbol is None:
-            return
+            return False
 
-        fetch_started_at = time.perf_counter()
-        with stability_diagnostics.operation(
-            "chart_fetch",
-            symbol=self.selected_symbol,
-            timeframe=self.selected_interval,
+        self.chart_job_sequence += 1
+        job = {
+            "job_id": self.chart_job_sequence,
+            "symbol": self.selected_symbol,
+            "timeframe": self.selected_interval,
+            "exchange_id": self.get_active_exchange_id(),
+            "display_symbol": self.display_symbol(self.selected_symbol),
+            "platform_market_name": self.platform_market_name(self.selected_symbol),
+            "exchange_name": self.market_label(),
+            "asset_class": self.asset_class(self.selected_symbol),
+        }
+        with self.chart_job_lock:
+            self.pending_chart_job = job
+            self.active_chart_job_id = job["job_id"]
+            self.chart_worker_busy = True
+            self.chart_job_event.set()
+        return True
+
+    def initialize_chart_worker(self):
+
+        self.chart_result_queue = Queue()
+        self.chart_job_lock = threading.Lock()
+        self.chart_job_event = threading.Event()
+        self.chart_shutdown_event = threading.Event()
+        self.pending_chart_job = None
+        self.chart_job_sequence = 0
+        self.active_chart_job_id = None
+        self.chart_worker_busy = False
+        self.chart_result_after_id = None
+        self.chart_worker_thread = threading.Thread(
+            target=self.chart_worker_loop,
+            name="SmartTradeChartLoader",
+            daemon=True,
+        )
+        self.chart_worker_thread.start()
+
+    def chart_worker_loop(self):
+
+        while not self.chart_shutdown_event.is_set():
+            self.chart_job_event.wait()
+            if self.chart_shutdown_event.is_set():
+                break
+            with self.chart_job_lock:
+                job = self.pending_chart_job
+                self.pending_chart_job = None
+                self.chart_job_event.clear()
+            if job is None:
+                continue
+            try:
+                fetch_started_at = time.perf_counter()
+                with stability_diagnostics.operation(
+                    "chart_fetch",
+                    symbol=job["symbol"],
+                    timeframe=job["timeframe"],
+                ):
+                    frame = self.fetch_klines(
+                        job["symbol"], job["timeframe"], job["exchange_id"]
+                    )
+                self.perf_log(
+                    "chart_fetch",
+                    fetch_started_at,
+                    symbol=job["symbol"],
+                    timeframe=job["timeframe"],
+                )
+                result = {**job, "frame": frame, "error": None}
+            except Exception as error:
+                stability_diagnostics.record_exception(
+                    "chart_worker", error, symbol=job["symbol"], job_id=job["job_id"]
+                )
+                result = {**job, "frame": None, "error": error}
+            if not self.chart_shutdown_event.is_set():
+                self.chart_result_queue.put(result)
+
+    def apply_chart_result(self, result):
+
+        if threading.get_ident() != self.ui_thread_id:
+            raise RuntimeError("Chart results must be applied on the Tk main thread.")
+        if self.shutdown_requested:
+            return False
+        if result["job_id"] != self.active_chart_job_id:
+            return False
+        self.active_chart_job_id = None
+        self.chart_worker_busy = False
+        if (
+            result["symbol"] != self.selected_symbol
+            or result["timeframe"] != self.selected_interval
+            or result["exchange_id"] != self.get_active_exchange_id()
         ):
-            df = self.fetch_klines(self.selected_symbol, self.selected_interval)
-        self.perf_log(
-            "chart_fetch",
-            fetch_started_at,
-            symbol=self.selected_symbol,
-            timeframe=self.selected_interval
-        )
-        df.attrs["symbol"] = self.selected_symbol
-        df.attrs["timeframe"] = self.selected_interval
-        df.attrs["display_symbol"] = self.display_symbol(self.selected_symbol)
-        df.attrs["platform_market_name"] = self.platform_market_name(
-            self.selected_symbol
-        )
-        df.attrs["exchange_id"] = self.get_active_exchange_id()
-        df.attrs["exchange_name"] = self.market_label()
-        df.attrs["asset_class"] = self.asset_class(self.selected_symbol)
+            return False
+        if result["error"] is not None:
+            print(
+                "Chart fetch error: "
+                f"{result['symbol']}: {type(result['error']).__name__}: {result['error']}"
+            )
+            return False
+
+        df = result["frame"]
+        df.attrs["symbol"] = result["symbol"]
+        df.attrs["timeframe"] = result["timeframe"]
+        df.attrs["display_symbol"] = result["display_symbol"]
+        df.attrs["platform_market_name"] = result["platform_market_name"]
+        df.attrs["exchange_id"] = result["exchange_id"]
+        df.attrs["exchange_name"] = result["exchange_name"]
+        df.attrs["asset_class"] = result["asset_class"]
 
         chart_fvg_gaps = self.resolve_chart_fvg_gaps(
             df,
-            self.selected_symbol,
-            self.selected_interval,
+            result["symbol"],
+            result["timeframe"],
         )
         chart_started_at = time.perf_counter()
         with stability_diagnostics.operation(
             "chart_set_candles",
-            symbol=self.selected_symbol,
-            timeframe=self.selected_interval,
+            symbol=result["symbol"],
+            timeframe=result["timeframe"],
         ):
             self.chart.set_candles(df, fvg_gaps=chart_fvg_gaps)
         self.perf_log(
             "chart_set_candles",
             chart_started_at,
-            symbol=self.selected_symbol,
-            timeframe=self.selected_interval
+            symbol=result["symbol"],
+            timeframe=result["timeframe"]
         )
         self.update_open_chart_status(current_polish_time())
+        return True
+
+    def process_chart_results(self):
+
+        self.chart_result_after_id = None
+        try:
+            while True:
+                try:
+                    result = self.chart_result_queue.get_nowait()
+                except Empty:
+                    break
+                self.apply_chart_result(result)
+        finally:
+            self.schedule_chart_result_poll()
+
+    def schedule_chart_result_poll(self):
+
+        if self.shutdown_requested or self.chart_result_after_id is not None:
+            return
+        self.chart_result_after_id = self.app.after(
+            SCAN_RESULT_POLL_MS, self.process_chart_results
+        )
+
+    def cancel_chart_result_poll(self):
+
+        if getattr(self, "chart_result_after_id", None) is None:
+            return
+        try:
+            self.app.after_cancel(self.chart_result_after_id)
+        except Exception:
+            pass
+        self.chart_result_after_id = None
+
+    def clear_chart_result_queue(self):
+
+        result_queue = getattr(self, "chart_result_queue", None)
+        if result_queue is None:
+            return
+        while True:
+            try:
+                result_queue.get_nowait()
+            except Empty:
+                return
 
     def matching_chart_scan_record(self, symbol, interval):
 
@@ -4674,6 +4856,8 @@ class SmartTradeUI:
         self.process_due_alerts()
         self.begin_scan_generation()
         self.schedule_scan_result_poll()
+        self.schedule_chart_result_poll()
+        self.schedule_exchange_result_poll()
         self.schedule_scan_loop(0)
         stability_diagnostics.attach_gui(self.app, self.stability_state)
 
@@ -4766,6 +4950,23 @@ class SmartTradeUI:
                 getattr(self, "scan_worker_thread", None)
                 and self.scan_worker_thread.is_alive()
             ),
+            "chart_worker_busy": getattr(self, "chart_worker_busy", False),
+            "chart_worker_alive": bool(
+                getattr(self, "chart_worker_thread", None)
+                and self.chart_worker_thread.is_alive()
+            ),
+            "chart_result_queue_size": (
+                self.chart_result_queue.qsize()
+                if getattr(self, "chart_result_queue", None) is not None else 0
+            ),
+            "exchange_worker_alive": bool(
+                getattr(self, "exchange_worker_thread", None)
+                and self.exchange_worker_thread.is_alive()
+            ),
+            "exchange_result_queue_size": (
+                self.exchange_result_queue.qsize()
+                if getattr(self, "exchange_result_queue", None) is not None else 0
+            ),
             "thread_count": threading.active_count(),
         }
 
@@ -4779,9 +4980,19 @@ class SmartTradeUI:
         self.current_scan_id = self.scan_generation
         self.cancel_scan_loop()
         self.cancel_scan_result_poll()
+        self.cancel_chart_result_poll()
+        self.cancel_exchange_result_poll()
         self.clear_scan_result_queue()
+        self.clear_chart_result_queue()
+        self.clear_exchange_result_queue()
         self.scan_shutdown_event.set()
         self.scan_job_event.set()
+        chart_shutdown_event = getattr(self, "chart_shutdown_event", None)
+        chart_job_event = getattr(self, "chart_job_event", None)
+        if chart_shutdown_event is not None:
+            chart_shutdown_event.set()
+        if chart_job_event is not None:
+            chart_job_event.set()
         stability_diagnostics.close()
 
         try:

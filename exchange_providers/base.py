@@ -1,8 +1,13 @@
 from abc import ABC, abstractmethod
+from collections import OrderedDict
 from dataclasses import dataclass, field
+import threading
+import time
 from typing import Any
 
 import pandas as pd
+
+from config import KLINE_CACHE_MAX_ENTRIES, KLINE_CACHE_TTL
 
 
 REQUIRED_CANDLE_COLUMNS = [
@@ -39,7 +44,9 @@ class ExchangeProvider(ABC):
     interval_map: dict[str, str]
 
     def __init__(self):
-        self._candle_cache = {}
+        self._candle_cache = OrderedDict()
+        self._candle_cache_lock = threading.RLock()
+        self.candle_cache_max_entries = KLINE_CACHE_MAX_ENTRIES
         self.last_error = None
 
     @abstractmethod
@@ -78,7 +85,32 @@ class ExchangeProvider(ABC):
         return f"{self.exchange_id}|{exchange_symbol}|{interval}|{limit}"
 
     def clear_cache(self):
-        self._candle_cache.clear()
+        with self._candle_cache_lock:
+            self._candle_cache.clear()
+
+    def get_cached_candles(self, key, now=None):
+        now = time.time() if now is None else float(now)
+        with self._candle_cache_lock:
+            cached = self._candle_cache.get(key)
+            if cached is None:
+                return None
+            if now - cached["time"] >= KLINE_CACHE_TTL:
+                self._candle_cache.pop(key, None)
+                return None
+            self._candle_cache.move_to_end(key)
+            return cached["data"]
+
+    def store_cached_candles(self, key, frame, now=None):
+        now = time.time() if now is None else float(now)
+        with self._candle_cache_lock:
+            self._candle_cache[key] = {"time": now, "data": frame}
+            self._candle_cache.move_to_end(key)
+            while len(self._candle_cache) > self.candle_cache_max_entries:
+                self._candle_cache.popitem(last=False)
+
+    def candle_cache_size(self):
+        with self._candle_cache_lock:
+            return len(self._candle_cache)
 
     def resolve_symbol(self, symbol):
         if isinstance(symbol, ExchangeSymbol):

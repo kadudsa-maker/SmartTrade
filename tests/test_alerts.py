@@ -244,6 +244,31 @@ def test_same_signal_id_does_not_fire_more_than_twice(tmp_path):
     assert len(notifier.sent) == 2
 
 
+def test_alert_history_keeps_only_the_most_recent_records(tmp_path):
+    manager = AlertManager(
+        settings_path=tmp_path / "alert_settings.json",
+        notifier=FakeNotifier(),
+        log_writer=FakeLogWriter(),
+        max_records=3,
+    )
+
+    signal_ids = []
+    for index in range(5):
+        divergence = sample_divergence()
+        divergence["confirmed_index"] = index
+        divergence["confirmed_time"] = 1000 + index
+        divergence["price_end"] = {"index": index, "time": 1000 + index}
+        signal_ids.append(build_signal_id(
+            "BTCUSDT", "15", divergence, exchange_id="bybit"
+        ))
+        manager.process_signal(
+            "BTCUSDT", "15", "watchlist", divergence, "ACTIVE", "", now=index
+        )
+
+    assert len(manager.alert_records) == 3
+    assert list(manager.alert_records) == signal_ids[-3:]
+
+
 def test_second_alert_does_not_fire_if_signal_was_opened(tmp_path):
 
     notifier = FakeNotifier()
